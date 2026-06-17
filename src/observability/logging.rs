@@ -8,11 +8,13 @@
 ///   `API_LOG_BODIES=true` is set in the environment.
 ///
 /// Sensitive headers (Authorization, Cookie, Set-Cookie) are never logged.
+/// All logged content is automatically redacted for sensitive data.
 use axum::{body::Body, extract::Request, middleware::Next, response::Response};
 use http_body_util::BodyExt;
 use std::time::Instant;
 
 use crate::request_id::RequestId;
+use crate::logging::redaction::{redact_sensitive_fields, auto_redact_string};
 
 /// Maximum bytes of a body to include in logs (prevents huge log lines).
 const MAX_BODY_LOG_BYTES: usize = 512;
@@ -117,6 +119,7 @@ pub async fn request_response_logging_middleware(req: Request<Body>, next: Next)
 }
 
 /// Truncate body bytes to `MAX_BODY_LOG_BYTES` and convert to a lossy UTF-8 string.
+/// Also applies automatic sensitive data redaction.
 fn truncate_body(bytes: &[u8]) -> String {
     let slice = if bytes.len() > MAX_BODY_LOG_BYTES {
         &bytes[..MAX_BODY_LOG_BYTES]
@@ -127,5 +130,13 @@ fn truncate_body(bytes: &[u8]) -> String {
     if bytes.len() > MAX_BODY_LOG_BYTES {
         s.push_str("…[truncated]");
     }
-    s
+    
+    // Apply sensitive data redaction
+    if s.starts_with('{') || s.starts_with('[') {
+        // Looks like JSON - apply field-level redaction
+        redact_sensitive_fields(&s)
+    } else {
+        // Apply general string redaction
+        auto_redact_string(&s)
+    }
 }
