@@ -1,5 +1,7 @@
 use serde::{Serialize, Serializer};
 use std::fmt;
+use regex::Regex;
+use once_cell::sync::Lazy;
 
 /// Wrapper type that redacts sensitive data in logs
 ///
@@ -123,6 +125,136 @@ pub fn redact_token(token: &str) -> String {
     }
 }
 
+/// Redact private key or seed phrase (completely hidden)
+#[must_use]
+pub fn redact_private_key(key: &str) -> String {
+    "[REDACTED_PRIVATE_KEY]".to_string()
+}
+
+/// Redact Stellar secret key (starts with 'S')
+#[must_use]
+pub fn redact_stellar_secret(secret: &str) -> String {
+    if secret.starts_with('S') && secret.len() == 56 {
+        format!("S****[REDACTED]")
+    } else {
+        "[REDACTED_SECRET]".to_string()
+    }
+}
+
+/// Redact JWT token (show header info only)
+#[must_use]
+pub fn redact_jwt(token: &str) -> String {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() == 3 {
+        format!("{}.[PAYLOAD_REDACTED].[SIGNATURE_REDACTED]", parts[0])
+    } else {
+        "[REDACTED_JWT]".to_string()
+    }
+}
+
+/// Redact mnemonic/seed phrase (show word count only)
+#[must_use] 
+pub fn redact_mnemonic(words: &str) -> String {
+    let word_count = words.split_whitespace().count();
+    format!("[{}_WORD_MNEMONIC_REDACTED]", word_count)
+}
+
+/// Redact phone number (show country code only)
+#[must_use]
+pub fn redact_phone(phone: &str) -> String {
+    if phone.starts_with('+') && phone.len() > 4 {
+        format!("{}****", &phone[..3])
+    } else {
+        "[REDACTED_PHONE]".to_string()
+    }
+}
+
+// Regex patterns for detecting sensitive data
+static STELLAR_ACCOUNT_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"G[A-Z0-9]{55}").unwrap()
+});
+
+static STELLAR_SECRET_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"S[A-Z0-9]{55}").unwrap()
+});
+
+static EMAIL_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}").unwrap()
+});
+
+static JWT_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*").unwrap()
+});
+
+static API_KEY_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\b[A-Za-z0-9_-]{32,}\b").unwrap()
+});
+
+/// Automatically redact sensitive data from any string
+#[must_use]
+pub fn auto_redact_string(input: &str) -> String {
+    let mut result = input.to_string();
+    
+    // Redact Stellar accounts
+    result = STELLAR_ACCOUNT_REGEX.replace_all(&result, "G****[REDACTED]").to_string();
+    
+    // Redact Stellar secret keys
+    result = STELLAR_SECRET_REGEX.replace_all(&result, "S****[REDACTED_SECRET]").to_string();
+    
+    // Redact email addresses
+    result = EMAIL_REGEX.replace_all(&result, "****@[REDACTED]").to_string();
+    
+    // Redact JWT tokens
+    result = JWT_REGEX.replace_all(&result, "[REDACTED_JWT]").to_string();
+    
+    // Redact potential API keys (long random strings)
+    result = API_KEY_REGEX.replace_all(&result, "[REDACTED_KEY]").to_string();
+    
+    result
+}
+
+/// Redact sensitive fields from JSON-like structures
+#[must_use]
+pub fn redact_sensitive_fields(json_str: &str) -> String {
+    let sensitive_fields = [
+        "password", "secret", "token", "key", "private", "seed", "mnemonic", 
+        "credential", "auth", "signature", "jwt", "bearer", "access_token",
+        "refresh_token", "client_secret", "api_key", "stellar_secret"
+    ];
+    
+    let mut result = json_str.to_string();
+    
+    for field in &sensitive_fields {
+        // Match field:"value" or field: "value" patterns
+        let pattern = format!(r#""{}":\s*"[^"]*""#, field);
+        let regex = Regex::new(&pattern).unwrap_or_else(|_| {
+            // Fallback to case-insensitive simple match
+            Regex::new(&format!(r"(?i){}.*", field)).unwrap()
+        });
+        result = regex.replace_all(&result, &format!(r#""{}":"[REDACTED]""#, field)).to_string();
+    }
+    
+    // Apply auto string redaction too
+    auto_redact_string(&result)
+}
+
+/// Comprehensive redaction for structured log data
+pub trait SecureDisplay {
+    fn secure_display(&self) -> String;
+}
+
+impl SecureDisplay for String {
+    fn secure_display(&self) -> String {
+        auto_redact_string(self)
+    }
+}
+
+impl SecureDisplay for &str {
+    fn secure_display(&self) -> String {
+        auto_redact_string(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +317,58 @@ mod tests {
         let redacted = Redacted(secret);
         assert_eq!(format!("{:?}", redacted), "[REDACTED]");
         assert_eq!(format!("{}", redacted), "[REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_stellar_secret() {
+        assert_eq!(
+            redact_stellar_secret("SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"),
+            "S****[REDACTED]"
+        );
+        assert_eq!(redact_stellar_secret("invalid"), "[REDACTED_SECRET]");
+    }
+
+    #[test]
+    fn test_redact_jwt() {
+        let jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+        assert_eq!(
+            redact_jwt(jwt),
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.[PAYLOAD_REDACTED].[SIGNATURE_REDACTED]"
+        );
+    }
+
+    #[test]
+    fn test_auto_redact_string() {
+        let input = "Account: GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX and secret: SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+        let result = auto_redact_string(input);
+        assert!(result.contains("G****[REDACTED]"));
+        assert!(result.contains("S****[REDACTED_SECRET]"));
+    }
+
+    #[test]
+    fn test_redact_sensitive_fields() {
+        let json = r#"{"username":"john","password":"secret123","token":"abc123"}"#;
+        let result = redact_sensitive_fields(json);
+        assert!(result.contains(r#""password":"[REDACTED]""#));
+        assert!(result.contains(r#""token":"[REDACTED]""#));
+        assert!(result.contains("username"));
+    }
+
+    #[test]
+    fn test_redact_mnemonic() {
+        let mnemonic = "abandon ability able about above absent absorb abstract absurd abuse access accident";
+        assert_eq!(redact_mnemonic(mnemonic), "[12_WORD_MNEMONIC_REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_phone() {
+        assert_eq!(redact_phone("+1234567890"), "+12****");
+        assert_eq!(redact_phone("1234567890"), "[REDACTED_PHONE]");
+    }
+
+    #[test]
+    fn test_secure_display_trait() {
+        let sensitive = "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+        assert!(sensitive.secure_display().contains("G****[REDACTED]"));
     }
 }

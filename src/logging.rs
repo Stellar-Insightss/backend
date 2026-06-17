@@ -4,7 +4,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 pub use redaction::{
     redact_account, redact_amount, redact_email, redact_hash, redact_ip, redact_token,
-    redact_user_id, Redacted,
+    redact_user_id, redact_stellar_secret, redact_jwt, redact_mnemonic, redact_phone,
+    redact_private_key, auto_redact_string, redact_sensitive_fields, Redacted, SecureDisplay,
 };
 
 /// Initializes logging to stdout only. No file output or rotation.
