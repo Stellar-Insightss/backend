@@ -8,7 +8,14 @@ use anyhow::Result;
 use std::env;
 
 /// Required environment variables that must be set
-const REQUIRED_VARS: &[&str] = &["DATABASE_URL", "ENCRYPTION_KEY", "JWT_SECRET"];
+const REQUIRED_VARS: &[&str] = &[
+    "DATABASE_URL",
+    "ENCRYPTION_KEY",
+    "JWT_SECRET",
+    "APP_ENV",
+    "VAULT_ADDR",
+    "VAULT_TOKEN",
+];
 
 /// Environment variables that should be validated if present
 const VALIDATED_VARS: &[(&str, fn(&str) -> bool)] = &[
@@ -21,6 +28,8 @@ const VALIDATED_VARS: &[(&str, fn(&str) -> bool)] = &[
     ("REQUEST_TIMEOUT_SECONDS", validate_request_timeout),
     ("SLOW_QUERY_THRESHOLD_MS", validate_slow_query_threshold),
     ("JWT_SECRET", validate_jwt_secret),
+    ("APP_ENV", validate_app_env),
+    ("VAULT_ADDR", validate_url_format),
 ];
 
 /// Validates all required environment variables are set
@@ -47,6 +56,8 @@ pub fn validate_env() -> Result<()> {
 
     // Specific, actionable validation for JWT_SECRET
     if let Ok(jwt_secret) = env::var("JWT_SECRET") {
+        let is_production = env::var("APP_ENV").unwrap_or_default() == "production";
+
         if jwt_secret == "CHANGE_ME_generate_with_openssl_rand_base64_48" {
             errors.push(
                 "JWT_SECRET is set to the placeholder value. \
@@ -54,6 +65,13 @@ pub fn validate_env() -> Result<()> {
                 Generate a secure secret with: openssl rand -base64 48"
                     .to_string(),
             );
+        } else if is_production && jwt_secret.len() < 48 {
+            errors.push(format!(
+                "JWT_SECRET is too short ({} characters) for production. \
+                Must be at least 48 characters. \
+                Generate a secure secret with: openssl rand -base64 48",
+                jwt_secret.len()
+            ));
         } else if jwt_secret.len() < 32 {
             errors.push(format!(
                 "JWT_SECRET is too short ({} characters). \
@@ -242,6 +260,16 @@ fn validate_stellar_public_key(value: &str) -> bool {
     value
         .chars()
         .all(|c| c.is_ascii_uppercase() || ('2'..='7').contains(&c))
+}
+
+/// Validate APP_ENV: must be development, test, or production
+fn validate_app_env(value: &str) -> bool {
+    matches!(value, "development" | "test" | "production")
+}
+
+/// Validate URL format
+fn validate_url_format(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://")
 }
 
 #[cfg(test)]
