@@ -1,7 +1,6 @@
-use serde::Deserialize;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use std::time::{Duration, Instant};
 
 use crate::vault::{VaultConfig, VaultError};
 
@@ -40,6 +39,66 @@ pub struct VaultClient {
     http_client: reqwest::Client,
     config: VaultConfig,
     lease_manager: Arc<RwLock<HashMap<String, LeaseInfo>>>,
+    circuit_breaker: Arc<RwLock<CircuitBreaker>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CircuitState {
+    Closed,
+    Open,
+    HalfOpen,
+}
+
+struct CircuitBreaker {
+    state: CircuitState,
+    failure_count: u32,
+    last_failure: Option<Instant>,
+    max_failures: u32,
+    reset_timeout: Duration,
+}
+
+impl CircuitBreaker {
+    fn new(max_failures: u32, reset_timeout: Duration) -> Self {
+        Self {
+            state: CircuitState::Closed,
+            failure_count: 0,
+            last_failure: None,
+            max_failures,
+            reset_timeout,
+        }
+    }
+
+    fn record_success(&mut self) {
+        self.state = CircuitState::Closed;
+        self.failure_count = 0;
+        self.last_failure = None;
+    }
+
+    fn record_failure(&mut self) {
+        self.failure_count += 1;
+        self.last_failure = Some(Instant::now());
+        if self.failure_count >= self.max_failures {
+            self.state = CircuitState::Open;
+            tracing::error!("Vault Circuit Breaker OPENED after {} failures", self.failure_count);
+        }
+    }
+
+    fn allow_request(&mut self) -> bool {
+        match self.state {
+            CircuitState::Closed => true,
+            CircuitState::Open => {
+                if let Some(last) = self.last_failure {
+                    if last.elapsed() > self.reset_timeout {
+                        self.state = CircuitState::HalfOpen;
+                        tracing::info!("Vault Circuit Breaker HALF-OPEN (testing recovery)");
+                        return true;
+                    }
+                }
+                false
+            }
+            CircuitState::HalfOpen => false, // Only one request at a time in HalfOpen (simplified)
+        }
+    }
 }
 
 /// Information about an active Vault lease
@@ -145,7 +204,7 @@ impl VaultClient {
     /// ```
     pub async fn new(config: VaultConfig) -> Result<Self, VaultError> {
         let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(10)) // Reduced timeout for better responsiveness
             .build()
             .map_err(|e| VaultError::ClientError(e.to_string()))?;
 
@@ -153,6 +212,7 @@ impl VaultClient {
             http_client,
             config,
             lease_manager: Arc::new(RwLock::new(HashMap::new())),
+            circuit_breaker: Arc::new(RwLock::new(CircuitBreaker::new(5, Duration::from_secs(60)))),
         };
 
         client.health_check().await?;
@@ -207,47 +267,61 @@ impl VaultClient {
     /// }
     /// ```
     pub async fn read_secret(&self, path: &str, field: Option<&str>) -> Result<String, VaultError> {
+        // SEC-009: Use circuit breaker to prevent cascading failures
+        if !self.circuit_breaker.write().await.allow_request() {
+            return Err(VaultError::VaultUnavailable);
+        }
+
         let url = format!(
             "{}/v1/data/{}",
             self.config.vault_addr,
             path.trim_start_matches('/')
         );
 
-        let resp = self
+        let resp_result = self
             .http_client
             .get(&url)
             .header("X-Vault-Token", &self.config.vault_token)
             .send()
-            .await
-            .map_err(|e| VaultError::RequestError(e.to_string()))?;
+            .await;
 
-        if !resp.status().is_success() {
-            return Err(VaultError::SecretNotFound(path.to_string()));
+        match resp_result {
+            Ok(resp) => {
+                self.circuit_breaker.write().await.record_success();
+                if !resp.status().is_success() {
+                    return Err(VaultError::SecretNotFound(path.to_string()));
+                }
+
+                let secret: KvReadResponse = resp
+                    .json()
+                    .await
+                    .map_err(|e| VaultError::ParseError(e.to_string()))?;
+
+                if let Some(field_name) = field {
+                    secret
+                        .data
+                        .data
+                        .get(field_name)
+                        .and_then(|v| v.as_str())
+                        .map(std::string::ToString::to_string)
+                        .ok_or_else(|| VaultError::FieldNotFound(field_name.to_string()))
+                } else {
+                    secret
+                        .data
+                        .data
+                        .values()
+                        .next()
+                        .and_then(|v| v.as_str())
+                        .map(std::string::ToString::to_string)
+                        .ok_or(VaultError::NoDataInSecret)
+                }
+            }
+            Err(e) => {
+                self.circuit_breaker.write().await.record_failure();
+                Err(VaultError::RequestError(e.to_string()))
+            }
         }
-
-        let secret: KvReadResponse = resp
-            .json()
-            .await
-            .map_err(|e| VaultError::ParseError(e.to_string()))?;
-
-        if let Some(field_name) = field {
-            secret
-                .data
-                .data
-                .get(field_name)
-                .and_then(|v| v.as_str())
-                .map(std::string::ToString::to_string)
-                .ok_or_else(|| VaultError::FieldNotFound(field_name.to_string()))
-        } else {
-            secret
-                .data
-                .data
-                .values()
-                .next()
-                .and_then(|v| v.as_str())
-                .map(std::string::ToString::to_string)
-                .ok_or(VaultError::NoDataInSecret)
-        }
+    }
     }
 
     /// Request dynamic `PostgreSQL` database credentials
@@ -284,51 +358,64 @@ impl VaultClient {
         &self,
         role: &str,
     ) -> Result<DatabaseCredentials, VaultError> {
+        // SEC-009: Use circuit breaker to prevent cascading failures
+        if !self.circuit_breaker.write().await.allow_request() {
+            return Err(VaultError::VaultUnavailable);
+        }
+
         let url = format!("{}/v1/database/creds/{}", self.config.vault_addr, role);
 
-        let resp = self
+        let resp_result = self
             .http_client
             .get(&url)
             .header("X-Vault-Token", &self.config.vault_token)
             .send()
-            .await
-            .map_err(|e| VaultError::RequestError(e.to_string()))?;
+            .await;
 
-        if !resp.status().is_success() {
-            return Err(VaultError::CredentialsFailed(role.to_string()));
+        match resp_result {
+            Ok(resp) => {
+                self.circuit_breaker.write().await.record_success();
+                if !resp.status().is_success() {
+                    return Err(VaultError::CredentialsFailed(role.to_string()));
+                }
+
+                let secret: VaultSecretResponse = resp
+                    .json()
+                    .await
+                    .map_err(|e| VaultError::ParseError(e.to_string()))?;
+
+                let data = &secret.data;
+                let username = data["username"]
+                    .as_str()
+                    .ok_or(VaultError::ParseError("Missing username".to_string()))?
+                    .to_string();
+                let password = data["password"]
+                    .as_str()
+                    .ok_or(VaultError::ParseError("Missing password".to_string()))?
+                    .to_string();
+
+                let mut leases = self.lease_manager.write().await;
+                leases.insert(
+                    secret.lease_id.clone(),
+                    LeaseInfo {
+                        lease_id: secret.lease_id,
+                        lease_duration: secret.lease_duration,
+                        renewable: secret.renewable,
+                        created_at: std::time::Instant::now(),
+                    },
+                );
+
+                Ok(DatabaseCredentials {
+                    username,
+                    password,
+                    ttl: secret.lease_duration,
+                })
+            }
+            Err(e) => {
+                self.circuit_breaker.write().await.record_failure();
+                Err(VaultError::RequestError(e.to_string()))
+            }
         }
-
-        let secret: VaultSecretResponse = resp
-            .json()
-            .await
-            .map_err(|e| VaultError::ParseError(e.to_string()))?;
-
-        let data = &secret.data;
-        let username = data["username"]
-            .as_str()
-            .ok_or(VaultError::ParseError("Missing username".to_string()))?
-            .to_string();
-        let password = data["password"]
-            .as_str()
-            .ok_or(VaultError::ParseError("Missing password".to_string()))?
-            .to_string();
-
-        let mut leases = self.lease_manager.write().await;
-        leases.insert(
-            secret.lease_id.clone(),
-            LeaseInfo {
-                lease_id: secret.lease_id,
-                lease_duration: secret.lease_duration,
-                renewable: secret.renewable,
-                created_at: std::time::Instant::now(),
-            },
-        );
-
-        Ok(DatabaseCredentials {
-            username,
-            password,
-            ttl: secret.lease_duration,
-        })
     }
 
     /// Renew a lease before it expires

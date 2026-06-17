@@ -122,6 +122,9 @@ impl Sep10Service {
     /// In a full implementation, this would create a proper Stellar transaction.
     /// This simplified version creates a challenge structure that can be signed.
     pub async fn generate_challenge(&self, request: ChallengeRequest) -> Result<ChallengeResponse> {
+        // SEC-008: Rate limiting by account to prevent brute-force
+        self.check_rate_limit(&request.account).await?;
+
         // Validate account address format
         if !request.account.starts_with('G') || request.account.len() != 56 {
             return Err(anyhow!("Invalid account address format"));
@@ -131,6 +134,13 @@ impl Sep10Service {
         if let Some(ref domain) = request.home_domain {
             if domain != &self.home_domain {
                 return Err(anyhow!("Invalid home domain"));
+            }
+        }
+
+        // Validate memo length if provided (SEP-10 memo limit)
+        if let Some(ref memo) = request.memo {
+            if memo.len() > 28 {
+                return Err(anyhow!("Memo exceeds 28 character limit"));
             }
         }
 
@@ -155,9 +165,16 @@ impl Sep10Service {
         let challenge_json = serde_json::to_string(&challenge)?;
         let transaction_xdr = BASE64.encode(challenge_json.as_bytes());
 
-        // Store challenge in Redis for validation
+        // Store challenge in Redis for validation (fail closed)
         self.store_challenge(&request.account, &nonce, challenge_expiry_seconds())
             .await?;
+
+        // MET-001: Log auth challenge metrics
+        tracing::info!(
+            event = "auth_challenge_generated",
+            account = %request.account,
+            expiry = %challenge_expiry_seconds()
+        );
 
         Ok(ChallengeResponse {
             transaction: transaction_xdr,
@@ -213,8 +230,25 @@ impl Sep10Service {
             .as_str()
             .ok_or_else(|| anyhow!("Missing nonce"))?;
 
+        // Fail-closed: Ensure challenge was issued by us and not consumed
         self.validate_and_consume_challenge(&client_account, nonce)
             .await?;
+
+        // Verify home domain matches
+        let challenge_home_domain = challenge["home_domain"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Missing home domain"))?;
+        if challenge_home_domain != self.home_domain {
+            return Err(anyhow!("Home domain mismatch"));
+        }
+
+        // Verify server key matches
+        let challenge_server_key = challenge["server"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Missing server key"))?;
+        if challenge_server_key != self.server_public_key {
+            return Err(anyhow!("Server key mismatch"));
+        }
 
         // Generate session token
         let token = self.generate_session_token(&client_account)?;
@@ -330,6 +364,44 @@ impl Sep10Service {
             conn.set_ex::<_, _, ()>(&key, session_json, expiry as u64)
                 .await
                 .map_err(|e| anyhow!("Failed to store session: {e}"))?;
+        }
+        Ok(())
+    }
+
+    async fn check_rate_limit(&self, account: &str) -> Result<()> {
+        if let Some(conn) = self.redis_connection.read().await.as_ref() {
+            let mut conn = conn.clone();
+            let key = format!("ratelimit:sep10:challenge:{account}");
+            let now = Utc::now().timestamp();
+            let window = 60; // 1 minute window
+            let max_requests = 10; // Max 10 requests per minute
+
+            // Clean up old entries
+            let min_score = now - window;
+            conn.zremrangebyscore::<_, _, _, ()>(&key, "-inf", min_score)
+                .await
+                .map_err(|e| anyhow!("Rate limit cleanup failed: {e}"))?;
+
+            // Count current requests
+            let count: u64 = conn
+                .zcard(&key)
+                .await
+                .map_err(|e| anyhow!("Rate limit check failed: {e}"))?;
+
+            if count >= max_requests {
+                tracing::warn!("Rate limit exceeded for account {account}");
+                return Err(anyhow!("Rate limit exceeded. Please try again later."));
+            }
+
+            // Add current request
+            conn.zadd::<_, _, _, ()>(&key, now, now)
+                .await
+                .map_err(|e| anyhow!("Rate limit update failed: {e}"))?;
+
+            // Set expiry on the set itself
+            conn.expire::<_, ()>(&key, window as u64)
+                .await
+                .map_err(|e| anyhow!("Rate limit expiry failed: {e}"))?;
         }
         Ok(())
     }
