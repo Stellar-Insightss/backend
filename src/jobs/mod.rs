@@ -2,6 +2,7 @@ pub mod asset_revalidation;
 pub mod backfill;
 pub mod contract_event_listener;
 pub mod scheduler;
+pub mod trace_aware_executor;
 
 pub use asset_revalidation::{AssetRevalidationJob, RevalidationConfig, RevalidationStats};
 pub use backfill::{
@@ -12,3 +13,4 @@ pub use contract_event_listener::{
     ContractEventListenerStats,
 };
 pub use scheduler::{JobConfig, JobScheduler};
+pub use trace_aware_executor::{spawn_traced, TraceAwareTask};

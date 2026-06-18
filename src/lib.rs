@@ -53,6 +53,7 @@ pub mod validation;
 pub mod vault;
 pub mod webhooks;
 pub mod websocket;
+pub mod websocket_trace;
 
 pub mod middleware;
 pub mod rpc;
