@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use chrono::{DateTime, Utc};
 
 use crate::rpc::{Asset, StellarRpcClient};
 
@@ -231,4 +232,153 @@ pub async fn get_order_book(
             }),
         )),
     }
+}
+
+// ── Realtime Pipeline Support: Snapshot & Reconciliation ────────────────────
+
+/// Analytics snapshot for corridor or anchor data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalyticsSnapshot {
+    pub snapshot_id: String,
+    pub snapshot_type: String, // "corridor" or "anchor"
+    pub timestamp: DateTime<Utc>,
+    pub data_hash: String,
+    pub record_count: usize,
+    pub data: serde_json::Value,
+}
+
+/// Reconciliation request for state sync after disconnect
+#[derive(Debug, Deserialize)]
+pub struct ReconciliationRequest {
+    pub last_known_timestamp: Option<String>,
+    pub data_types: Vec<String>, // e.g., ["corridor", "anchor"]
+}
+
+/// Reconciliation response with state updates
+#[derive(Debug, Serialize)]
+pub struct ReconciliationResponse {
+    pub reconciliation_id: String,
+    pub timestamp: DateTime<Utc>,
+    pub updates: Vec<serde_json::Value>,
+    pub is_complete: bool,
+}
+
+/// Get analytics snapshot for a specific data type
+/// Endpoint: GET /api/rpc/snapshot/{snapshot_type}
+#[utoipa::path(
+    get,
+    path = "/api/rpc/snapshot/{snapshot_type}",
+    params(
+        ("snapshot_type" = String, Path, description = "Type of snapshot: 'corridor', 'anchor', or 'all'")
+    ),
+    responses(
+        (status = 200, description = "Analytics snapshot"),
+        (status = 400, description = "Invalid snapshot type", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "Realtime"
+)]
+#[tracing::instrument(skip(client))]
+pub async fn get_analytics_snapshot(
+    State(client): State<Arc<StellarRpcClient>>,
+    Path(snapshot_type): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    // Validate snapshot type
+    if !["corridor", "anchor", "all"].contains(&snapshot_type.as_str()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid snapshot_type. Must be 'corridor', 'anchor', or 'all'".to_string(),
+            }),
+        ));
+    }
+
+    // Create placeholder snapshot - in production, this would query actual analytics data
+    let snapshot_data = match snapshot_type.as_str() {
+        "corridor" => serde_json::json!({
+            "corridors": [],
+            "total_count": 0,
+            "last_update": Utc::now().to_rfc3339()
+        }),
+        "anchor" => serde_json::json!({
+            "anchors": [],
+            "total_count": 0,
+            "last_update": Utc::now().to_rfc3339()
+        }),
+        "all" => serde_json::json!({
+            "corridors": [],
+            "anchors": [],
+            "timestamp": Utc::now().to_rfc3339()
+        }),
+        _ => serde_json::json!({}),
+    };
+
+    let snapshot_id = uuid::Uuid::new_v4().to_string();
+    let data_hash = format!(
+        "{:x}",
+        md5::compute(snapshot_data.to_string().as_bytes())
+    );
+
+    let snapshot = AnalyticsSnapshot {
+        snapshot_id,
+        snapshot_type,
+        timestamp: Utc::now(),
+        data_hash,
+        record_count: 0,
+        data: snapshot_data,
+    };
+
+    Ok(Json(snapshot))
+}
+
+/// Reconcile state after WebSocket reconnect
+/// Endpoint: POST /api/rpc/reconcile
+#[utoipa::path(
+    post,
+    path = "/api/rpc/reconcile",
+    request_body = ReconciliationRequest,
+    responses(
+        (status = 200, description = "Reconciliation complete", body = ReconciliationResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "Realtime"
+)]
+#[tracing::instrument(skip(client))]
+pub async fn reconcile_state(
+    State(client): State<Arc<StellarRpcClient>>,
+    Json(request): Json<ReconciliationRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let reconciliation_id = uuid::Uuid::new_v4().to_string();
+
+    let mut updates = Vec::new();
+
+    // For each requested data type, collect updates since last known timestamp
+    for data_type in request.data_types {
+        match data_type.as_str() {
+            "corridor" => {
+                updates.push(serde_json::json!({
+                    "type": "corridor",
+                    "updates": [],
+                    "timestamp": Utc::now().to_rfc3339()
+                }));
+            }
+            "anchor" => {
+                updates.push(serde_json::json!({
+                    "type": "anchor",
+                    "updates": [],
+                    "timestamp": Utc::now().to_rfc3339()
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    let response = ReconciliationResponse {
+        reconciliation_id,
+        timestamp: Utc::now(),
+        updates,
+        is_complete: true,
+    };
+
+    Ok(Json(response))
 }

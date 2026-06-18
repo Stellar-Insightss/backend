@@ -88,6 +88,38 @@ impl RateLimitInfo {
     }
 }
 
+/// Global subscription recovery state: maps connection IDs to their subscribed channels
+/// Used to restore subscriptions after reconnect
+pub struct SubscriptionRecoveryState {
+    pub subscriptions: DashMap<String, Vec<String>>, // client_id -> channels
+}
+
+impl SubscriptionRecoveryState {
+    pub fn new() -> Self {
+        Self {
+            subscriptions: DashMap::new(),
+        }
+    }
+
+    pub fn save_subscription(&self, client_id: String, channels: Vec<String>) {
+        self.subscriptions.insert(client_id, channels);
+    }
+
+    pub fn get_subscription(&self, client_id: &str) -> Option<Vec<String>> {
+        self.subscriptions.get(client_id).map(|v| v.value().clone())
+    }
+
+    pub fn clear_subscription(&self, client_id: &str) {
+        self.subscriptions.remove(client_id);
+    }
+}
+
+impl Default for SubscriptionRecoveryState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── WebSocket state ───────────────────────────────────────────────────────────
 
 pub struct WsState {
@@ -100,6 +132,8 @@ pub struct WsState {
     ip_rate_limits: DashMap<IpAddr, IpRateLimit>,
     /// Redis client for cross-instance pub/sub. `None` when Redis is unavailable.
     redis_client: Option<redis::Client>,
+    /// Subscription recovery state for automatic resubscribe on reconnect
+    pub recovery_state: SubscriptionRecoveryState,
 }
 
 /// Redis channel used for cross-instance WebSocket message fan-out.
@@ -134,6 +168,7 @@ impl WsState {
             rate_limits: DashMap::new(),
             ip_rate_limits: DashMap::new(),
             redis_client,
+            recovery_state: SubscriptionRecoveryState::new(),
         }
     }
 
@@ -302,13 +337,15 @@ impl WsState {
 
     pub fn subscribe_connection(&self, connection_id: Uuid, channels: Vec<String>) {
         let mut subscription_set = self.subscriptions.entry(connection_id).or_default();
-        for channel in channels {
+        for channel in channels.iter() {
             subscription_set.insert(channel.clone());
             info!(
                 "Connection {} subscribed to channel: {}",
                 connection_id, channel
             );
         }
+        // Save subscription state for recovery on reconnect
+        self.recovery_state.save_subscription(connection_id.to_string(), channels);
     }
 
     pub fn unsubscribe_connection(&self, connection_id: Uuid, channels: Vec<String>) {
@@ -341,6 +378,21 @@ impl WsState {
         self.subscriptions.remove(&connection_id);
         self.message_rate_limits.remove(&connection_id);
         self.cleanup_rate_limit(&connection_id.to_string());
+    }
+
+    /// Attempt to recover subscriptions from a previous connection
+    /// Returns the recovered channels if any exist
+    pub fn recover_subscriptions(&self, client_id: &str) -> Option<Vec<String>> {
+        if let Some(channels) = self.recovery_state.get_subscription(client_id) {
+            info!(
+                "Recovered {} subscriptions for client {}",
+                channels.len(),
+                client_id
+            );
+            Some(channels)
+        } else {
+            None
+        }
     }
 
     fn try_acquire_connection_permit(self: &Arc<Self>, ip: IpAddr) -> Option<ConnectionPermit> {
@@ -465,6 +517,9 @@ pub enum WsMessage {
         channels: Vec<String>,
         status: String,
     },
+    SubscriptionRecovered {
+        channels: Vec<String>,
+    },
     Ping {
         timestamp: i64,
     },
@@ -476,6 +531,8 @@ pub enum WsMessage {
     },
     ConnectionStatus {
         status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        previous_id: Option<String>,
     },
     Error {
         message: String,
@@ -490,6 +547,7 @@ pub enum WsMessage {
 #[derive(Debug, Deserialize)]
 pub struct WsQueryParams {
     pub token: Option<String>,
+    pub previous_id: Option<String>,
 }
 
 /// `MethodRouter` for `GET /ws` (built in the library crate so Axum types stay consistent).
@@ -554,7 +612,9 @@ pub async fn ws_handler(
         }
     }
 
-    ws.on_upgrade(move |socket| handle_socket(socket, state, connection_permit))
+    ws.on_upgrade(move |socket| {
+        handle_socket(socket, state, connection_permit, params.previous_id.clone())
+    })
 }
 
 fn validate_token(token: &str) -> bool {
@@ -570,6 +630,7 @@ async fn handle_socket(
     socket: WebSocket,
     state: Arc<WsState>,
     connection_permit: ConnectionPermit,
+    previous_id: Option<String>,
 ) {
     let connection_id = Uuid::new_v4();
     let client_id = connection_id.to_string();
@@ -584,6 +645,7 @@ async fn handle_socket(
 
     let mut broadcast_rx = state.tx.subscribe();
 
+    // Send Connected message
     let _ = send_ws_message(
         &sender,
         &WsMessage::Connected {
@@ -591,6 +653,27 @@ async fn handle_socket(
         },
     )
     .await;
+
+    // Attempt to recover subscriptions from previous connection
+    if let Some(prev_id) = previous_id {
+        if let Some(channels) = state.recover_subscriptions(&prev_id) {
+            // Re-subscribe to recovered channels
+            state.subscribe_connection(connection_id, channels.clone());
+            // Notify client of recovery
+            let _ = send_ws_message(
+                &sender,
+                &WsMessage::SubscriptionRecovered {
+                    channels: channels.clone(),
+                },
+            )
+            .await;
+            info!(
+                "Recovered {} subscriptions from previous connection {}",
+                channels.len(),
+                prev_id
+            );
+        }
+    }
 
     let send_sender = Arc::clone(&sender);
     let recv_sender = Arc::clone(&sender);

@@ -2,6 +2,109 @@ use crate::models::{AnchorMetrics, AnchorStatus};
 
 pub mod corridor;
 
+// ── Data Integrity Validation ──────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub enum ValidationError {
+    MissingField(String),
+    InvalidFormat(String),
+    OutOfRange(String),
+    InvalidAddress(String),
+}
+
+impl std::fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValidationError::MissingField(field) => write!(f, "Missing required field: {}", field),
+            ValidationError::InvalidFormat(field) => write!(f, "Invalid format: {}", field),
+            ValidationError::OutOfRange(field) => write!(f, "Value out of range: {}", field),
+            ValidationError::InvalidAddress(field) => write!(f, "Invalid address: {}", field),
+        }
+    }
+}
+
+impl std::error::Error for ValidationError {}
+
+/// Validates anchor metrics conform to expected ranges and constraints
+pub fn validate_anchor_metrics(metrics: &AnchorMetrics) -> Result<(), ValidationError> {
+    // Validate success rate is in [0.0, 100.0]
+    if metrics.success_rate < 0.0 || metrics.success_rate > 100.0 {
+        return Err(ValidationError::OutOfRange("success_rate".to_string()));
+    }
+
+    // Validate failure rate is in [0.0, 100.0]
+    if metrics.failure_rate < 0.0 || metrics.failure_rate > 100.0 {
+        return Err(ValidationError::OutOfRange("failure_rate".to_string()));
+    }
+
+    // Validate that success + failure rates are consistent
+    let sum = (metrics.success_rate + metrics.failure_rate).round();
+    if sum > 100.1 || sum < 99.9 {
+        // Allow small rounding error
+        return Err(ValidationError::OutOfRange(
+            "success_rate + failure_rate != 100".to_string(),
+        ));
+    }
+
+    // Validate reliability score is in [0.0, 100.0]
+    if metrics.reliability_score < 0.0 || metrics.reliability_score > 100.0 {
+        return Err(ValidationError::OutOfRange("reliability_score".to_string()));
+    }
+
+    // Validate transaction counts
+    if metrics.total_transactions < 0 {
+        return Err(ValidationError::OutOfRange("total_transactions must be non-negative".to_string()));
+    }
+
+    if metrics.successful_transactions > metrics.total_transactions {
+        return Err(ValidationError::OutOfRange(
+            "successful_transactions cannot exceed total_transactions".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validates anchor reliability score components
+pub fn validate_reliability_score(score: &AnchorReliabilityScore) -> Result<(), ValidationError> {
+    // Validate composite score
+    if score.composite_score < 0.0 || score.composite_score > 100.0 {
+        return Err(ValidationError::OutOfRange("composite_score".to_string()));
+    }
+
+    // Validate asset performance score
+    if score.asset_performance_score < 0.0 || score.asset_performance_score > 100.0 {
+        return Err(ValidationError::OutOfRange("asset_performance_score".to_string()));
+    }
+
+    // Validate volume score
+    if score.volume_score < 0.0 || score.volume_score > 100.0 {
+        return Err(ValidationError::OutOfRange("volume_score".to_string()));
+    }
+
+    // Validate asset diversity score
+    if score.asset_diversity_score < 0.0 || score.asset_diversity_score > 100.0 {
+        return Err(ValidationError::OutOfRange("asset_diversity_score".to_string()));
+    }
+
+    // Validate weighted success rate
+    if score.weighted_success_rate < 0.0 || score.weighted_success_rate > 100.0 {
+        return Err(ValidationError::OutOfRange("weighted_success_rate".to_string()));
+    }
+
+    // Validate total assets is non-negative
+    if score.total_assets < 0 {
+        return Err(ValidationError::OutOfRange("total_assets must be non-negative".to_string()));
+    }
+
+    // Validate total volume is non-negative
+    if score.total_volume_usd < 0.0 {
+        return Err(ValidationError::OutOfRange("total_volume_usd must be non-negative".to_string()));
+    }
+
+    Ok(())
+}
+
 /// Performance metrics for an anchor's individual asset
 #[derive(Debug, Clone)]
 pub struct AnchorAssetPerformance {
@@ -251,6 +354,9 @@ mod tests {
         assert_eq!(metrics.failure_rate, 0.5);
         assert!(metrics.reliability_score > 90.0);
         assert_eq!(metrics.status, AnchorStatus::Green);
+
+        // Validate metrics pass integrity checks
+        assert!(validate_anchor_metrics(&metrics).is_ok());
     }
 
     #[test]
@@ -443,6 +549,9 @@ mod tests {
         println!("  Volume: {:.2}", usdc_score.volume_score);
         println!("  Diversity: {:.2}", usdc_score.asset_diversity_score);
 
+        // Verify score passes validation
+        assert!(validate_reliability_score(&usdc_score).is_ok());
+
         // Scenario 2: New regional anchor
         let new_anchor = vec![AnchorAssetPerformance {
             asset_code: "NGN".to_string(),
@@ -460,8 +569,63 @@ mod tests {
         println!("  Volume: {:.2}", new_score.volume_score);
         println!("  Diversity: {:.2}", new_score.asset_diversity_score);
 
+        // Verify score passes validation
+        assert!(validate_reliability_score(&new_score).is_ok());
+
         // Verify established anchor has higher score
         assert!(usdc_score.composite_score > new_score.composite_score);
         println!("\nEstablished anchor scores higher than new anchor");
+    }
+
+    #[test]
+    fn test_validate_anchor_metrics_success() {
+        let metrics = compute_anchor_metrics(1000, 950, 50, Some(5000));
+        assert!(validate_anchor_metrics(&metrics).is_ok());
+    }
+
+    #[test]
+    fn test_validate_anchor_metrics_fails_on_invalid_success_rate() {
+        let mut metrics = compute_anchor_metrics(1000, 950, 50, Some(5000));
+        metrics.success_rate = 150.0; // Invalid: > 100
+        assert!(validate_anchor_metrics(&metrics).is_err());
+    }
+
+    #[test]
+    fn test_validate_reliability_score_success() {
+        let assets = vec![AnchorAssetPerformance {
+            asset_code: "USDC".to_string(),
+            asset_issuer: "ISSUER1".to_string(),
+            total_transactions: 1000,
+            successful_transactions: 950,
+            failed_transactions: 50,
+            total_volume_usd: 100_000.0,
+        }];
+
+        let score = compute_anchor_reliability_score(&assets, 1_000_000.0);
+        assert!(validate_reliability_score(&score).is_ok());
+    }
+
+    #[test]
+    fn test_validate_reliability_score_fails_on_invalid_composite() {
+        let assets = vec![AnchorAssetPerformance {
+            asset_code: "USDC".to_string(),
+            asset_issuer: "ISSUER1".to_string(),
+            total_transactions: 1000,
+            successful_transactions: 950,
+            failed_transactions: 50,
+            total_volume_usd: 100_000.0,
+        }];
+
+        let mut score = compute_anchor_reliability_score(&assets, 1_000_000.0);
+        score.composite_score = 150.0; // Invalid: > 100
+        assert!(validate_reliability_score(&score).is_err());
+    }
+
+    #[test]
+    fn test_validate_metrics_sum_consistency() {
+        let metrics = compute_anchor_metrics(1000, 950, 50, Some(5000));
+        // success_rate + failure_rate should be ~100%
+        let sum = metrics.success_rate + metrics.failure_rate;
+        assert!((sum - 100.0).abs() < 0.1, "Rates don't sum to 100%");
     }
 }
