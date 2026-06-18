@@ -1,5 +1,5 @@
 /*
-Temporarily disabled due to stellar_sdk 0.1 dependency issues.
+Soroban transaction signing and submission service.
 */
 use anyhow::{Context, Result};
 use reqwest::Client;
@@ -8,20 +8,107 @@ use serde_json::json;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
-// Stellar XDR signing types are referenced in the commented signing block below.
-// Stellar SDK transaction signing is handled via the Soroban RPC simulation flow.
-// Full keypair-based signing requires a Soroban-compatible SDK; the current
-// implementation delegates auth to the RPC layer via simulateTransaction.
-
-// Note: KeyPair and Network are not in stellar-xdr.
-// They are expected to be provided by a future update or a separate crate.
-// For now, we use stubs to allow compilation if possible, or assume they'll be fixed in Cargo.toml.
-// The compiler suggested using stellar_xdr::curr for most types.
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use ed25519_dalek::{SigningKey, VerifyingKey};
+use sha2::{Digest, Sha256};
+use stellar_xdr::{
+    curr::{DecoratedSignature, Signature, TransactionEnvelope},
+    ReadXdr,
+};
+use std::convert::TryInto;
 
 const MAX_RETRIES: u32 = 3;
 const INITIAL_BACKOFF_MS: u64 = 1000;
 const BACKOFF_MULTIPLIER: u64 = 2;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
+
+/// Stellar secret key version byte
+const STELLAR_SECRET_KEY_VERSION: u8 = 48; // '0' in base32
+
+/// Helper to decode a Stellar secret key (starts with 'S')
+/// Stellar secret keys are base32-encoded with version byte at the start
+fn decode_stellar_secret_key(secret: &str) -> Result<[u8; 32]> {
+    if !secret.starts_with('S') {
+        return Err(anyhow::anyhow!("Invalid Stellar secret key format: must start with 'S'"));
+    }
+
+    // Decode the base32 secret key (without the 'S' prefix)
+    let decoded = base32_decode(&secret[1..])?;
+    
+    if decoded.len() != 33 {
+        return Err(anyhow::anyhow!(
+            "Invalid Stellar secret key length: expected 33 bytes (32 key + 1 version), got {}",
+            decoded.len()
+        ));
+    }
+
+    // First byte should be version byte
+    if decoded[0] != STELLAR_SECRET_KEY_VERSION {
+        return Err(anyhow::anyhow!(
+            "Invalid Stellar secret key version byte: expected {}, got {}",
+            STELLAR_SECRET_KEY_VERSION,
+            decoded[0]
+        ));
+    }
+
+    // Extract the 32-byte key
+    Ok(decoded[1..].try_into()?)
+}
+
+/// Simple base32 decoder for Stellar keys
+/// Stellar uses a custom base32 alphabet
+fn base32_decode(input: &str) -> Result<Vec<u8>> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    
+    let mut result = Vec::new();
+    let mut buffer: u32 = 0;
+    let mut bits: u32 = 0;
+
+    for ch in input.chars() {
+        if ch == '=' {
+            break;
+        }
+        
+        let idx = ALPHABET.iter().position(|&b| b == ch as u8)
+            .ok_or_else(|| anyhow::anyhow!("Invalid base32 character: {}", ch))?;
+        
+        buffer = (buffer << 5) | (idx as u32);
+        bits += 5;
+
+        if bits >= 8 {
+            bits -= 8;
+            result.push(((buffer >> bits) & 0xFF) as u8);
+        }
+    }
+
+    Ok(result)
+}
+
+/// Helper to compute the transaction hash for signing
+/// This follows the Stellar transaction envelope hashing convention
+fn compute_transaction_hash(network_passphrase: &str, tx_envelope_xdr: &[u8]) -> Result<[u8; 32]> {
+    let mut hasher = Sha256::new();
+    
+    // Hash the network passphrase (Stellar convention)
+    let network_hash = {
+        let mut nh = Sha256::new();
+        nh.update("StellarNetwork\0");
+        let mut name = nh.finalize().to_vec();
+        name.extend_from_slice(network_passphrase.as_bytes());
+        let mut n2 = Sha256::new();
+        n2.update(&name);
+        n2.finalize()
+    };
+
+    hasher.update(&network_hash);
+    
+    // Hash the transaction envelope XDR
+    hasher.update(b"\x00\x00\x00\x02"); // ENVELOPE_TYPE_TX = 2 in XDR format
+    hasher.update(tx_envelope_xdr);
+
+    let hash = hasher.finalize();
+    Ok(hash.as_slice().try_into()?)
+}
 
 /// Configuration for the contract service
 #[derive(Clone, Debug)]
@@ -280,63 +367,99 @@ impl ContractService {
             .and_then(|t| t.as_str())
             .ok_or_else(|| anyhow::anyhow!("Simulation did not return transaction data"))?;
 
-        // In a full implementation, we would decode the XDR, add resources, sign, and encode.
-        // For this task, we'll implement a robust signing flow with stellar-sdk.
-
-        // FIXME: KeyPair and Network are not resolving from stellar_sdk "0.1".
-        // This service needs a working KeyPair implementation for on-chain signing.
-        // For now, we return the transaction as-is from simulation to allow the rest of the file to compile.
-        /*
-        let keypair = KeyPair::from_secret_seed(&self.config.source_secret_key)
-            .map_err(|e| anyhow::anyhow!("Invalid source secret key: {}", e))?;
-
-        let network = StellarNetwork::new(&self.config.network_passphrase);
-
-        // Decode the transaction envelope from simulation
-        let xdr_bytes = general_purpose::STANDARD
-            .decode(transaction_xdr)
-            .context("Failed to decode simulation XDR")?;
-
-        let envelope = TransactionEnvelope::from_xdr(&xdr_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to parse transaction XDR: {}", e))?;
-
-        // Sign the transaction
-        let tx_hash = match &envelope {
-            TransactionEnvelope::V1 { tx, .. } => tx.hash(&network)?,
-            _ => return Err(anyhow::anyhow!("Unsupported transaction envelope version")),
-        };
-
-        let signature = keypair.sign(&tx_hash);
-
-        // Add signature to envelope
-        let mut final_envelope = envelope;
-        if let TransactionEnvelope::V1 {
-            ref mut signatures, ..
-        } = final_envelope
-        {
-            let decorated_sig = DecoratedSignature {
-                hint: keypair.public_key().signature_hint(),
-                signature: Signature(signature.try_into()?),
-            };
-            signatures.push(decorated_sig);
-        }
-
-        // Re-encode to base64 XDR
-        let signed_xdr = general_purpose::STANDARD.encode(&final_envelope.to_xdr()?);
-
-        Ok(signed_xdr)
-        */
-
-        // Validate the XDR is non-empty base64 before forwarding.
+        // Validate the XDR is non-empty base64
         if transaction_xdr.is_empty() {
             return Err(anyhow::anyhow!("Simulation returned empty transactionData"));
         }
 
+        debug!("Decoding XDR from simulation response ({} chars)", transaction_xdr.len());
+
+        // Step 1: Decode the base64 XDR
+        let xdr_bytes = BASE64
+            .decode(transaction_xdr)
+            .context("Failed to decode base64 XDR from simulation")?;
+
+        debug!("XDR decoded to {} bytes", xdr_bytes.len());
+
+        // Step 2: Parse the transaction envelope
+        let mut envelope = TransactionEnvelope::from_xdr(&xdr_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to parse transaction XDR: {:?}", e))
+            .context("Invalid transaction envelope XDR")?;
+
+        debug!("Transaction envelope parsed successfully");
+
+        // Step 3: Decode the secret key and create signing key
+        let secret_key_bytes = decode_stellar_secret_key(&self.config.source_secret_key)
+            .context("Failed to decode source secret key")?;
+        
+        let signing_key = SigningKey::from_bytes(&secret_key_bytes);
+        let verifying_key: VerifyingKey = (&signing_key).into();
+
         debug!(
-            "Using simulation-provided transaction XDR ({} chars)",
-            transaction_xdr.len()
+            "Keypair loaded (public key: {})",
+            hex::encode(verifying_key.to_bytes())
         );
-        Ok(transaction_xdr.to_string())
+
+        // Step 4: Compute transaction hash for signing
+        let mut tx_hasher = Sha256::new();
+        
+        // Hash network passphrase first (Stellar convention)
+        let mut network_id_hasher = Sha256::new();
+        network_id_hasher.update(b"StellarNetwork\0");
+        let mut network_id_data = network_id_hasher.finalize().to_vec();
+        network_id_data.extend_from_slice(self.config.network_passphrase.as_bytes());
+        
+        let mut network_id = Sha256::new();
+        network_id.update(&network_id_data);
+        let network_hash = network_id.finalize();
+
+        tx_hasher.update(&network_hash[..]);
+        tx_hasher.update(&[0, 0, 0, 2]); // ENVELOPE_TYPE_TX = 2
+
+        // Hash the transaction envelope XDR
+        let envelope_xdr = envelope.to_xdr()
+            .map_err(|e| anyhow::anyhow!("Failed to re-encode transaction envelope: {:?}", e))?;
+        tx_hasher.update(&envelope_xdr);
+
+        let tx_hash: [u8; 32] = tx_hasher.finalize().as_slice().try_into()?;
+
+        debug!("Transaction hash computed: {}", hex::encode(&tx_hash));
+
+        // Step 5: Sign the transaction hash
+        let signature = signing_key.sign(&tx_hash);
+        let sig_bytes: [u8; 64] = signature.to_bytes();
+
+        debug!("Transaction signed with Ed25519 signature");
+
+        // Step 6: Add signature to envelope
+        match &mut envelope {
+            TransactionEnvelope::V1(e) => {
+                // Compute signature hint from public key (last 4 bytes)
+                let public_bytes = verifying_key.to_bytes();
+                let hint_slice: [u8; 4] = public_bytes[28..32].try_into()?;
+                
+                let decorated_sig = DecoratedSignature {
+                    hint: hint_slice,
+                    signature: Signature(sig_bytes),
+                };
+
+                e.signatures.push(decorated_sig);
+                debug!("Signature added to transaction envelope (total signatures: {})", e.signatures.len());
+            }
+            _ => {
+                return Err(anyhow::anyhow!("Unsupported transaction envelope version"));
+            }
+        }
+
+        // Step 7: Re-encode to base64
+        let final_xdr = envelope.to_xdr()
+            .map_err(|e| anyhow::anyhow!("Failed to encode signed transaction: {:?}", e))?;
+        let signed_xdr = BASE64.encode(&final_xdr);
+
+        debug!("Signed transaction XDR re-encoded to base64 ({} chars)", signed_xdr.len());
+        info!("Transaction successfully signed and prepared for submission");
+
+        Ok(signed_xdr)
     }
 
     async fn send_transaction(&self, signed_xdr: &str) -> Result<String> {
