@@ -127,7 +127,7 @@ pub fn redact_token(token: &str) -> String {
 
 /// Redact private key or seed phrase (completely hidden)
 #[must_use]
-pub fn redact_private_key(key: &str) -> String {
+pub fn redact_private_key(_key: &str) -> String {
     "[REDACTED_PRIVATE_KEY]".to_string()
 }
 
@@ -370,5 +370,119 @@ mod tests {
     fn test_secure_display_trait() {
         let sensitive = "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
         assert!(sensitive.secure_display().contains("G****[REDACTED]"));
+    }
+
+    // ---- log-pipeline redaction tests (SEC-LOG) ----------------------------
+    // These tests simulate passing sensitive values through the redaction
+    // helpers before they reach a log sink and assert no plaintext leaks.
+
+    #[test]
+    fn test_redact_does_not_leak_stellar_secret_in_request_log() {
+        let secret = "SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+        let redacted = redact_stellar_secret(secret);
+        assert!(
+            !redacted.contains(secret),
+            "Stellar secret must not appear in redacted output"
+        );
+        assert!(
+            redacted.starts_with("S****"),
+            "Redacted secret should start with S****"
+        );
+    }
+
+    #[test]
+    fn test_redact_does_not_leak_jwt_payload() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJ1c2VyIjoiYWRtaW4ifQ.signature";
+        let redacted = redact_jwt(jwt);
+        // The payload and signature parts must not appear verbatim
+        assert!(
+            !redacted.contains("eyJ1c2VyIjoiYWRtaW4ifQ"),
+            "JWT payload must not appear in redacted output"
+        );
+        assert!(
+            !redacted.contains("signature"),
+            "JWT signature must not appear in redacted output"
+        );
+        assert!(
+            redacted.contains("[PAYLOAD_REDACTED]"),
+            "Redacted JWT should contain payload placeholder"
+        );
+    }
+
+    #[test]
+    fn test_redact_does_not_leak_api_key_in_error_log() {
+        let error_msg = "Request failed: api_key=super_secret_api_key_1234567890abcdef";
+        let redacted = auto_redact_string(error_msg);
+        assert!(
+            !redacted.contains("super_secret_api_key_1234567890abcdef"),
+            "API key must not appear in redacted error log output"
+        );
+    }
+
+    #[test]
+    fn test_redact_sensitive_fields_covers_access_token() {
+        let payload = r#"{"username":"alice","access_token":"tok_abcdef1234567890","data":"ok"}"#;
+        let redacted = redact_sensitive_fields(payload);
+        assert!(
+            !redacted.contains("tok_abcdef1234567890"),
+            "access_token value must not appear in redacted output"
+        );
+        assert!(
+            redacted.contains("username"),
+            "Non-sensitive field 'username' should remain"
+        );
+    }
+
+    #[test]
+    fn test_redact_sensitive_fields_covers_client_secret() {
+        let payload = r#"{"client_id":"app123","client_secret":"very_secret_value_xyz"}"#;
+        let redacted = redact_sensitive_fields(payload);
+        assert!(
+            !redacted.contains("very_secret_value_xyz"),
+            "client_secret must not appear in redacted output"
+        );
+        assert!(
+            redacted.contains("client_id"),
+            "Non-sensitive client_id field should remain"
+        );
+    }
+
+    #[test]
+    fn test_auto_redact_strips_emails_from_error_context() {
+        let log_line = "User not found: admin@stellar-insights.com (404)";
+        let redacted = auto_redact_string(log_line);
+        assert!(
+            !redacted.contains("admin@stellar-insights.com"),
+            "Email address must not appear in redacted log"
+        );
+        assert!(
+            redacted.contains("****@[REDACTED]"),
+            "Redacted email placeholder should be present"
+        );
+    }
+
+    #[test]
+    fn test_redact_private_key_always_fully_hidden() {
+        let key = "ed25519_private_key_data_abcdef1234567890";
+        let redacted = redact_private_key(key);
+        assert_eq!(
+            redacted, "[REDACTED_PRIVATE_KEY]",
+            "Private key must always be fully redacted"
+        );
+        assert!(!redacted.contains("ed25519"), "Key material must not leak");
+    }
+
+    #[test]
+    fn test_redact_mnemonic_hides_word_count_not_words() {
+        let mnemonic = "word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12";
+        let redacted = redact_mnemonic(mnemonic);
+        assert!(
+            !redacted.contains("word1"),
+            "Mnemonic words must not appear in redacted output"
+        );
+        assert!(
+            redacted.contains("12"),
+            "Redacted mnemonic should indicate word count"
+        );
     }
 }

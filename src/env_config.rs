@@ -3,6 +3,12 @@
 //! This module provides validation for required environment variables
 //! and ensures the application fails fast with clear error messages
 //! if critical configuration is missing.
+//!
+//! ## Fail-Fast Startup Behaviour
+//!
+//! [`validate_env`] is called **before** any network connections are opened.
+//! If validation fails the process exits with a descriptive error, preventing
+//! a misconfigured backend from silently serving bad data.
 
 use anyhow::Result;
 use std::env;
@@ -15,6 +21,15 @@ const REQUIRED_VARS: &[&str] = &[
     "APP_ENV",
     "VAULT_ADDR",
     "VAULT_TOKEN",
+];
+
+/// Known placeholder values that must never appear in real deployments
+const PLACEHOLDER_PREFIXES: &[&str] = &[
+    "CHANGE_ME",
+    "REPLACE_ME",
+    "YOUR_SECRET",
+    "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX", // 51-char Stellar placeholder prefix
+    "SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX", // 51-char Stellar secret placeholder prefix
 ];
 
 /// Environment variables that should be validated if present
@@ -30,16 +45,40 @@ const VALIDATED_VARS: &[(&str, fn(&str) -> bool)] = &[
     ("JWT_SECRET", validate_jwt_secret),
     ("APP_ENV", validate_app_env),
     ("VAULT_ADDR", validate_url_format),
+    ("STELLAR_RPC_URL_MAINNET", validate_stellar_rpc_url),
+    ("STELLAR_RPC_URL_TESTNET", validate_stellar_rpc_url),
+    ("STELLAR_HORIZON_URL_MAINNET", validate_url_format),
+    ("STELLAR_HORIZON_URL_TESTNET", validate_url_format),
+    ("STELLAR_NETWORK", validate_stellar_network),
 ];
 
-/// Validates all required environment variables are set
+/// Check if a value matches a known placeholder pattern
+fn is_placeholder(value: &str) -> bool {
+    PLACEHOLDER_PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+}
+
+/// Validates all required environment variables are set and contain no placeholders.
+///
+/// Called during startup — the process **must not proceed** if this returns an error.
 pub fn validate_env() -> Result<()> {
     let mut errors = Vec::new();
 
     // Check required variables
     for var in REQUIRED_VARS {
-        if env::var(var).is_err() {
-            errors.push(format!("Missing required environment variable: {var}"));
+        match env::var(var) {
+            Err(_) => {
+                errors.push(format!(
+                    "Missing required environment variable: {var}. \
+                     See .env.example for configuration guidance."
+                ));
+            }
+            Ok(value) if is_placeholder(&value) => {
+                errors.push(format!(
+                    "Environment variable {var} is set to a placeholder value '{value}'. \
+                     Replace it with a real value before starting the server."
+                ));
+            }
+            Ok(_) => {}
         }
     }
 
@@ -48,7 +87,8 @@ pub fn validate_env() -> Result<()> {
         if let Ok(value) = env::var(var) {
             if !validator(&value) {
                 errors.push(format!(
-                    "Invalid value for environment variable {var}: '{value}'"
+                    "Invalid value for environment variable {var}: '{value}'. \
+                     See .env.example for the expected format."
                 ));
             }
         }
@@ -95,14 +135,82 @@ pub fn validate_env() -> Result<()> {
         }
     }
 
+    // Cross-validate network consistency
+    if let Err(network_errors) = validate_network_consistency() {
+        errors.extend(network_errors);
+    }
+
     if !errors.is_empty() {
         anyhow::bail!(
-            "Environment configuration errors:\n  - {}",
+            "Environment configuration errors ({} issue(s)):\n  - {}",
+            errors.len(),
             errors.join("\n  - ")
         );
     }
 
     Ok(())
+}
+
+/// Validates that network-related environment variables are mutually consistent.
+///
+/// For example: if `STELLAR_NETWORK=mainnet` is set but the passphrase looks like
+/// a testnet passphrase, that is a misconfiguration we must reject.
+pub fn validate_network_consistency() -> Result<(), Vec<String>> {
+    let mut errors = Vec::new();
+
+    let network = env::var("STELLAR_NETWORK").unwrap_or_default();
+    let passphrase = env::var("STELLAR_NETWORK_PASSPHRASE").unwrap_or_default();
+
+    if !network.is_empty() && !passphrase.is_empty() {
+        let is_mainnet_network = network.eq_ignore_ascii_case("mainnet");
+        let is_testnet_passphrase = passphrase.contains("Test SDF");
+        let is_mainnet_passphrase = passphrase.contains("Public Global Stellar");
+
+        if is_mainnet_network && is_testnet_passphrase {
+            errors.push(
+                "Network mismatch: STELLAR_NETWORK=mainnet but STELLAR_NETWORK_PASSPHRASE \
+                 contains a testnet passphrase. \
+                 For mainnet use: 'Public Global Stellar Network ; September 2015'"
+                    .to_string(),
+            );
+        }
+
+        if !is_mainnet_network && network.eq_ignore_ascii_case("testnet") && is_mainnet_passphrase {
+            errors.push(
+                "Network mismatch: STELLAR_NETWORK=testnet but STELLAR_NETWORK_PASSPHRASE \
+                 contains a mainnet passphrase. \
+                 For testnet use: 'Test SDF Network ; September 2015'"
+                    .to_string(),
+            );
+        }
+    }
+
+    // Validate that RPC URLs are consistent with the declared network
+    if let Ok(rpc_mainnet) = env::var("STELLAR_RPC_URL_MAINNET") {
+        if rpc_mainnet.contains("testnet") {
+            errors.push(
+                "STELLAR_RPC_URL_MAINNET appears to point to a testnet endpoint (URL contains 'testnet'). \
+                 Verify this is intentional."
+                    .to_string(),
+            );
+        }
+    }
+
+    if let Ok(rpc_testnet) = env::var("STELLAR_RPC_URL_TESTNET") {
+        if !rpc_testnet.contains("testnet") && !rpc_testnet.contains("localhost") && !rpc_testnet.contains("127.0.0.1") {
+            errors.push(
+                "STELLAR_RPC_URL_TESTNET does not appear to point to a testnet endpoint. \
+                 Ensure STELLAR_RPC_URL_TESTNET is set to a testnet RPC URL."
+                    .to_string(),
+            );
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
 
 /// Logs all configured environment variables (without sensitive values)
@@ -272,6 +380,22 @@ fn validate_url_format(value: &str) -> bool {
     value.starts_with("http://") || value.starts_with("https://")
 }
 
+/// Validate Stellar RPC URL — must be a proper HTTPS URL (non-placeholder)
+fn validate_stellar_rpc_url(value: &str) -> bool {
+    if !validate_url_format(value) {
+        return false;
+    }
+    if is_placeholder(value) {
+        return false;
+    }
+    true
+}
+
+/// Validate STELLAR_NETWORK: must be "mainnet" or "testnet"
+fn validate_stellar_network(value: &str) -> bool {
+    matches!(value.to_lowercase().as_str(), "mainnet" | "testnet")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,5 +521,127 @@ mod tests {
         std::env::remove_var("DATABASE_URL");
         std::env::remove_var("ENCRYPTION_KEY");
         std::env::remove_var("JWT_SECRET");
+    }
+
+    #[test]
+    fn test_validate_stellar_network_valid() {
+        assert!(validate_stellar_network("mainnet"));
+        assert!(validate_stellar_network("testnet"));
+        assert!(validate_stellar_network("MAINNET"));
+        assert!(validate_stellar_network("Testnet"));
+    }
+
+    #[test]
+    fn test_validate_stellar_network_invalid() {
+        assert!(!validate_stellar_network("stagenet"));
+        assert!(!validate_stellar_network("devnet"));
+        assert!(!validate_stellar_network(""));
+        assert!(!validate_stellar_network("main"));
+    }
+
+    #[test]
+    fn test_validate_stellar_rpc_url_valid() {
+        assert!(validate_stellar_rpc_url("https://soroban-testnet.stellar.org"));
+        assert!(validate_stellar_rpc_url("https://stellar.api.onfinality.io/public"));
+        assert!(validate_stellar_rpc_url("http://localhost:8000"));
+    }
+
+    #[test]
+    fn test_validate_stellar_rpc_url_invalid() {
+        assert!(!validate_stellar_rpc_url("not-a-url"));
+        assert!(!validate_stellar_rpc_url("ftp://example.com"));
+        assert!(!validate_stellar_rpc_url("CHANGE_ME_rpc_url"));
+    }
+
+    #[test]
+    fn test_is_placeholder_detection() {
+        assert!(is_placeholder("CHANGE_ME_generate_with_openssl_rand_base64_48"));
+        assert!(is_placeholder("REPLACE_ME_with_real_value"));
+        assert!(is_placeholder("YOUR_SECRET_HERE"));
+        assert!(!is_placeholder("actual_real_secret_value_12345678901234567890"));
+    }
+
+    #[test]
+    fn test_network_consistency_mainnet_testnet_mismatch() {
+        std::env::set_var("STELLAR_NETWORK", "mainnet");
+        std::env::set_var(
+            "STELLAR_NETWORK_PASSPHRASE",
+            "Test SDF Network ; September 2015",
+        );
+
+        let result = validate_network_consistency();
+        assert!(result.is_err(), "Should catch mainnet/testnet mismatch");
+        let errors = result.unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("Network mismatch")));
+
+        std::env::remove_var("STELLAR_NETWORK");
+        std::env::remove_var("STELLAR_NETWORK_PASSPHRASE");
+    }
+
+    #[test]
+    fn test_network_consistency_valid_mainnet() {
+        std::env::set_var("STELLAR_NETWORK", "mainnet");
+        std::env::set_var(
+            "STELLAR_NETWORK_PASSPHRASE",
+            "Public Global Stellar Network ; September 2015",
+        );
+
+        let result = validate_network_consistency();
+        assert!(result.is_ok(), "Valid mainnet config should pass");
+
+        std::env::remove_var("STELLAR_NETWORK");
+        std::env::remove_var("STELLAR_NETWORK_PASSPHRASE");
+    }
+
+    #[test]
+    fn test_network_consistency_valid_testnet() {
+        std::env::set_var("STELLAR_NETWORK", "testnet");
+        std::env::set_var(
+            "STELLAR_NETWORK_PASSPHRASE",
+            "Test SDF Network ; September 2015",
+        );
+
+        let result = validate_network_consistency();
+        assert!(result.is_ok(), "Valid testnet config should pass");
+
+        std::env::remove_var("STELLAR_NETWORK");
+        std::env::remove_var("STELLAR_NETWORK_PASSPHRASE");
+    }
+
+    #[test]
+    fn test_rpc_url_mainnet_testnet_cross_contamination() {
+        std::env::set_var(
+            "STELLAR_RPC_URL_MAINNET",
+            "https://soroban-testnet.stellar.org",
+        );
+
+        let result = validate_network_consistency();
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("STELLAR_RPC_URL_MAINNET")));
+
+        std::env::remove_var("STELLAR_RPC_URL_MAINNET");
+    }
+
+    #[test]
+    fn test_env_rejects_placeholder_required_var() {
+        std::env::set_var("DATABASE_URL", "CHANGE_ME_db_url");
+        std::env::set_var("ENCRYPTION_KEY", "a".repeat(32));
+        std::env::set_var("JWT_SECRET", "a".repeat(48));
+        std::env::set_var("APP_ENV", "development");
+        std::env::set_var("VAULT_ADDR", "https://vault.example.com");
+        std::env::set_var("VAULT_TOKEN", "a".repeat(16));
+
+        let result = validate_env();
+        assert!(result.is_err(), "Should reject placeholder DATABASE_URL");
+
+        std::env::remove_var("DATABASE_URL");
+        std::env::remove_var("ENCRYPTION_KEY");
+        std::env::remove_var("JWT_SECRET");
+        std::env::remove_var("APP_ENV");
+        std::env::remove_var("VAULT_ADDR");
+        std::env::remove_var("VAULT_TOKEN");
     }
 }
