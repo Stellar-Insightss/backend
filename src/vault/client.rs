@@ -322,7 +322,6 @@ impl VaultClient {
             }
         }
     }
-    }
 
     /// Request dynamic `PostgreSQL` database credentials
     ///
