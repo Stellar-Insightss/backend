@@ -30,6 +30,32 @@ const MIN_PAGINATION_DELAY_MS: u64 = 50;
 /// Default delay between pagination requests
 const DEFAULT_PAGINATION_DELAY_MS: u64 = 100;
 
+// ============================================================================
+// RPC Timeout Configuration
+// ============================================================================
+/// Default per-request HTTP timeout in seconds for Stellar RPC / Horizon calls
+const DEFAULT_RPC_REQUEST_TIMEOUT_SECONDS: u64 = 30;
+/// Minimum allowed per-request timeout (prevents misconfiguration)
+const MIN_RPC_REQUEST_TIMEOUT_SECONDS: u64 = 5;
+/// Maximum allowed per-request timeout
+const MAX_RPC_REQUEST_TIMEOUT_SECONDS: u64 = 120;
+
+/// Load per-request RPC timeout from environment, clamped to safe bounds.
+///
+/// Reads `RPC_REQUEST_TIMEOUT_SECONDS` (default 30 s).
+#[must_use]
+pub fn rpc_request_timeout_from_env() -> Duration {
+    let secs = std::env::var("RPC_REQUEST_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RPC_REQUEST_TIMEOUT_SECONDS)
+        .clamp(
+            MIN_RPC_REQUEST_TIMEOUT_SECONDS,
+            MAX_RPC_REQUEST_TIMEOUT_SECONDS,
+        );
+    Duration::from_secs(secs)
+}
+
 /// Stellar RPC Client for interacting with Stellar network via RPC and Horizon API
 // Asset Models (Horizon API)
 // ==========================================
@@ -92,6 +118,8 @@ pub struct StellarRpcClient {
     initial_backoff: Duration,
     /// Maximum backoff duration
     max_backoff: Duration,
+    /// Per-request HTTP timeout (applies to every individual Horizon / RPC call)
+    request_timeout: Duration,
 }
 
 // ============================================================================
@@ -477,8 +505,10 @@ impl StellarRpcClient {
     /// * `horizon_url` - The Horizon API endpoint URL
     /// * `mock_mode` - If true, returns mock data instead of making real API calls
     pub fn new(rpc_url: String, horizon_url: String, mock_mode: bool) -> Self {
+        let request_timeout = rpc_request_timeout_from_env();
+
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(request_timeout)
             .build()
             .expect("Failed to build HTTP client");
         let rate_limiter = RpcRateLimiter::new(RpcRateLimitConfig::from_env());
@@ -543,8 +573,11 @@ impl StellarRpcClient {
         }
 
         info!(
-            "RPC pagination config: max_per_request={}, max_total={}, delay_ms={}",
-            max_records_per_request, max_total_records, pagination_delay_ms
+            "RPC client initialized: timeout={}s, max_per_request={}, max_total={}, delay_ms={}",
+            request_timeout.as_secs(),
+            max_records_per_request,
+            max_total_records,
+            pagination_delay_ms
         );
 
         Self {
@@ -561,6 +594,7 @@ impl StellarRpcClient {
             max_retries: max_retries_from_env(),
             initial_backoff: initial_backoff_from_env(),
             max_backoff: max_backoff_from_env(),
+            request_timeout,
         }
     }
 
@@ -568,9 +602,10 @@ impl StellarRpcClient {
     #[must_use]
     pub fn new_with_network(network: StellarNetwork, mock_mode: bool) -> Self {
         let network_config = NetworkConfig::for_network(network);
+        let request_timeout = rpc_request_timeout_from_env();
 
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(request_timeout)
             .build()
             .expect("Failed to build HTTP client");
         let rate_limiter = RpcRateLimiter::new(RpcRateLimitConfig::from_env());
@@ -609,6 +644,7 @@ impl StellarRpcClient {
             max_retries: max_retries_from_env(),
             initial_backoff: initial_backoff_from_env(),
             max_backoff: max_backoff_from_env(),
+            request_timeout,
         }
     }
 
@@ -648,6 +684,12 @@ impl StellarRpcClient {
         self.rate_limiter.metrics()
     }
 
+    /// Return the configured per-request HTTP timeout for this client.
+    #[must_use]
+    pub const fn request_timeout(&self) -> Duration {
+        self.request_timeout
+    }
+
     async fn execute_with_retry<F, Fut, T>(&self, operation: F) -> Result<T, RpcError>
     where
         F: Fn() -> Fut,
@@ -668,7 +710,11 @@ impl StellarRpcClient {
             return Ok(super::mock_stellar::mock_health_response());
         }
 
-        info!("Checking RPC health at {}", self.rpc_url);
+        info!(
+            rpc_url = %self.rpc_url,
+            timeout_secs = self.request_timeout.as_secs(),
+            "Checking RPC health"
+        );
 
         let result = self
             .execute_with_retry(|| self.check_health_internal())
@@ -676,6 +722,12 @@ impl StellarRpcClient {
 
         result.inspect_err(|e| {
             metrics::record_rpc_error(e.error_type_label(), "stellar");
+            tracing::error!(
+                error = %e,
+                error_type = e.error_type_label(),
+                rpc_url = %self.rpc_url,
+                "RPC health check failed after all retries exhausted"
+            );
         })
     }
 
@@ -727,6 +779,12 @@ impl StellarRpcClient {
 
         result.inspect_err(|e| {
             metrics::record_rpc_error(e.error_type_label(), "stellar");
+            tracing::error!(
+                error = %e,
+                error_type = e.error_type_label(),
+                horizon_url = %self.horizon_url,
+                "fetch_latest_ledger failed after all retries exhausted"
+            );
         })
     }
 
@@ -1931,6 +1989,80 @@ mod tests {
         );
         assert_eq!(client.max_total_records, DEFAULT_MAX_TOTAL_RECORDS);
         assert_eq!(client.pagination_delay_ms, DEFAULT_PAGINATION_DELAY_MS);
+    }
+
+    // ---- timeout & retry configuration tests --------------------------------
+
+    #[test]
+    fn test_rpc_request_timeout_default() {
+        std::env::remove_var("RPC_REQUEST_TIMEOUT_SECONDS");
+        let timeout = rpc_request_timeout_from_env();
+        assert_eq!(
+            timeout,
+            Duration::from_secs(DEFAULT_RPC_REQUEST_TIMEOUT_SECONDS)
+        );
+    }
+
+    #[test]
+    fn test_rpc_request_timeout_from_env() {
+        std::env::set_var("RPC_REQUEST_TIMEOUT_SECONDS", "60");
+        let timeout = rpc_request_timeout_from_env();
+        assert_eq!(timeout, Duration::from_secs(60));
+        std::env::remove_var("RPC_REQUEST_TIMEOUT_SECONDS");
+    }
+
+    #[test]
+    fn test_rpc_request_timeout_clamped_min() {
+        std::env::set_var("RPC_REQUEST_TIMEOUT_SECONDS", "1"); // below minimum of 5
+        let timeout = rpc_request_timeout_from_env();
+        assert_eq!(
+            timeout,
+            Duration::from_secs(MIN_RPC_REQUEST_TIMEOUT_SECONDS)
+        );
+        std::env::remove_var("RPC_REQUEST_TIMEOUT_SECONDS");
+    }
+
+    #[test]
+    fn test_rpc_request_timeout_clamped_max() {
+        std::env::set_var("RPC_REQUEST_TIMEOUT_SECONDS", "9999"); // above maximum of 120
+        let timeout = rpc_request_timeout_from_env();
+        assert_eq!(
+            timeout,
+            Duration::from_secs(MAX_RPC_REQUEST_TIMEOUT_SECONDS)
+        );
+        std::env::remove_var("RPC_REQUEST_TIMEOUT_SECONDS");
+    }
+
+    #[test]
+    fn test_rpc_request_timeout_invalid_value() {
+        std::env::set_var("RPC_REQUEST_TIMEOUT_SECONDS", "not_a_number");
+        let timeout = rpc_request_timeout_from_env();
+        // Should fall back to default
+        assert_eq!(
+            timeout,
+            Duration::from_secs(DEFAULT_RPC_REQUEST_TIMEOUT_SECONDS)
+        );
+        std::env::remove_var("RPC_REQUEST_TIMEOUT_SECONDS");
+    }
+
+    #[tokio::test]
+    async fn test_client_exposes_request_timeout() {
+        std::env::remove_var("RPC_REQUEST_TIMEOUT_SECONDS");
+        let client = StellarRpcClient::new_with_defaults(true);
+        assert_eq!(
+            client.request_timeout(),
+            Duration::from_secs(DEFAULT_RPC_REQUEST_TIMEOUT_SECONDS)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_health_check_with_timeout() {
+        std::env::set_var("RPC_REQUEST_TIMEOUT_SECONDS", "10");
+        let client = StellarRpcClient::new_with_defaults(true);
+        let health = client.check_health().await.unwrap();
+        assert_eq!(health.status, "healthy");
+        assert_eq!(client.request_timeout(), Duration::from_secs(10));
+        std::env::remove_var("RPC_REQUEST_TIMEOUT_SECONDS");
     }
 
     #[tokio::test]
