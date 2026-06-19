@@ -3,6 +3,7 @@ pub mod alerts;
 pub mod analytics;
 pub mod api;
 pub mod api_analytics_middleware;
+pub mod api_contract;
 pub mod api_deprecation_middleware;
 pub mod api_v1_middleware;
 pub mod deprecation_middleware;
@@ -17,6 +18,7 @@ pub mod cache;
 pub mod cache_invalidation;
 // cache_middleware removed in favor of cache helper APIs
 pub mod crypto;
+pub mod cursor_pagination;
 pub mod database;
 
 pub mod db;
@@ -24,6 +26,7 @@ pub mod email;
 pub mod env_config;
 pub mod error;
 pub mod features;
+pub mod field_selection;
 pub mod handlers; // Core handlers (pool_metrics, health_check, ingestion_status)
 pub mod health_check_enhanced; // Enhanced health check with mobile support
 pub mod http_cache; // HTTP caching layer (ETag/conditional responses)

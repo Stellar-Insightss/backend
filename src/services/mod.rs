@@ -20,6 +20,7 @@ pub mod service_container;
 pub mod slack_bot;
 pub mod snapshot;
 pub mod stellar_toml;
+pub mod stellar_toml_validator;
 pub mod trustline_analyzer;
 pub mod verification_rewards;
 pub mod webhook_dispatcher;
