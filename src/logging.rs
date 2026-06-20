@@ -1,3 +1,4 @@
+pub mod quality_assertions;
 pub mod redaction;
 
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
