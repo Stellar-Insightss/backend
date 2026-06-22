@@ -275,15 +275,22 @@ mod tests {
     async fn replay_invalid_dedup_key_rejected() {
         let processor =
             QueueProcessor::new(Arc::new(LoggingProcessor));
-        let result = processor
-            .process(QueueProcessor::build_message(
-                "",
-                QueueMessageType::RecordUsageEvent {
-                    event_name: "x".into(),
-                    properties: serde_json::json!({}),
-                },
-            ).unwrap())
-            .await;
+        // Build message directly (bypass build_message) so the empty
+        // dedup_key reaches QueueProcessor::process.
+        let msg = QueueMessage {
+            id: Uuid::new_v4(),
+            dedup_key: String::new(),
+            message: QueueMessageType::RecordUsageEvent {
+                event_name: "x".into(),
+                properties: serde_json::json!({}),
+            },
+            status: QueueMessageStatus::Pending,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            attempts: 0,
+            last_error: None,
+        };
+        let result = processor.process(msg).await;
         assert!(matches!(result, Err(QueueReplayError::Invalid(_))));
     }
 
