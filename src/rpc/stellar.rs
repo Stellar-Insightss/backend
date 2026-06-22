@@ -507,6 +507,11 @@ impl StellarRpcClient {
     pub fn new(rpc_url: String, horizon_url: String, mock_mode: bool) -> Self {
         let request_timeout = rpc_request_timeout_from_env();
 
+        // SAFETY: reqwest::ClientBuilder::build only fails when a TLS backend is
+        // unavailable or a custom certificate is malformed. With only a timeout
+        // set this call is infallible; panicking here is the correct behaviour
+        // because a misconfigured environment should abort startup immediately.
+        #[allow(clippy::expect_used)]
         let client = Client::builder()
             .timeout(request_timeout)
             .build()
@@ -604,6 +609,8 @@ impl StellarRpcClient {
         let network_config = NetworkConfig::for_network(network);
         let request_timeout = rpc_request_timeout_from_env();
 
+        // SAFETY: see comment in `new` — only timeout is set, build is infallible.
+        #[allow(clippy::expect_used)]
         let client = Client::builder()
             .timeout(request_timeout)
             .build()
@@ -846,12 +853,14 @@ impl StellarRpcClient {
         let mut params = serde_json::Map::new();
         params.insert("pagination".to_string(), json!({ "limit": limit }));
         if let Some(c) = cursor {
-            params
+            // We just inserted "pagination" as an object above; this nested
+            // modification is safe, but we use if-let to avoid any .expect.
+            if let Some(obj) = params
                 .get_mut("pagination")
-                .expect("pagination field should exist")
-                .as_object_mut()
-                .expect("pagination should be an object")
-                .insert("cursor".to_string(), json!(c));
+                .and_then(|v| v.as_object_mut())
+            {
+                obj.insert("cursor".to_string(), json!(c));
+            }
         } else if let Some(start) = start_ledger {
             params.insert("startLedger".to_string(), json!(start));
         }
