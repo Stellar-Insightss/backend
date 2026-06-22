@@ -2,6 +2,7 @@ pub mod admin_audit_log;
 pub mod alerts;
 pub mod analytics;
 pub mod api;
+pub mod debugging;
 pub mod api_analytics_middleware;
 pub mod api_contract;
 pub mod api_deprecation_middleware;
