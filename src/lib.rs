@@ -45,6 +45,7 @@ pub mod observability;
 pub mod openapi;
 pub mod pagination;
 pub mod payload_limit;
+pub mod queue;
 pub mod rate_limit;
 pub mod replay;
 pub mod request_id;
