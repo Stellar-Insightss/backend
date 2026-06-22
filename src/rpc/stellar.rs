@@ -526,6 +526,15 @@ impl StellarRpcClient {
                 Client::new()
             }
         };
+        // SAFETY: reqwest::ClientBuilder::build only fails when a TLS backend is
+        // unavailable or a custom certificate is malformed. With only a timeout
+        // set this call is infallible; panicking here is the correct behaviour
+        // because a misconfigured environment should abort startup immediately.
+        #[allow(clippy::expect_used)]
+        let client = Client::builder()
+            .timeout(request_timeout)
+            .build()
+            .expect("Failed to build HTTP client");
         let rate_limiter = RpcRateLimiter::new(RpcRateLimitConfig::from_env());
 
         // Determine network based on URLs
@@ -638,6 +647,12 @@ impl StellarRpcClient {
                 Client::new()
             }
         };
+        // SAFETY: see comment in `new` — only timeout is set, build is infallible.
+        #[allow(clippy::expect_used)]
+        let client = Client::builder()
+            .timeout(request_timeout)
+            .build()
+            .expect("Failed to build HTTP client");
         let rate_limiter = RpcRateLimiter::new(RpcRateLimitConfig::from_env());
         let circuit_breaker = rpc_circuit_breaker();
 
@@ -887,6 +902,13 @@ impl StellarRpcClient {
                 return Err(RpcError::ParseError(
                     "internal: pagination field missing or malformed".to_string(),
                 ));
+            // We just inserted "pagination" as an object above; this nested
+            // modification is safe, but we use if-let to avoid any .expect.
+            if let Some(obj) = params
+                .get_mut("pagination")
+                .and_then(|v| v.as_object_mut())
+            {
+                obj.insert("cursor".to_string(), json!(c));
             }
         } else if let Some(start) = start_ledger {
             params.insert("startLedger".to_string(), json!(start));
