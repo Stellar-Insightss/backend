@@ -25,6 +25,7 @@ pub mod cache_invalidation;
 pub mod crypto;
 pub mod cursor_pagination;
 pub mod database;
+pub mod debug;
 
 pub mod db;
 pub mod email;
