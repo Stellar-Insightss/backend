@@ -902,13 +902,6 @@ impl StellarRpcClient {
                 return Err(RpcError::ParseError(
                     "internal: pagination field missing or malformed".to_string(),
                 ));
-            // We just inserted "pagination" as an object above; this nested
-            // modification is safe, but we use if-let to avoid any .expect.
-            if let Some(obj) = params
-                .get_mut("pagination")
-                .and_then(|v| v.as_object_mut())
-            {
-                obj.insert("cursor".to_string(), json!(c));
             }
         } else if let Some(start) = start_ledger {
             params.insert("startLedger".to_string(), json!(start));
