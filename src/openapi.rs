@@ -162,6 +162,9 @@ use utoipa::OpenApi;
         crate::api::verification_rewards::get_leaderboard,
         crate::api::verification_rewards::get_user_verifications,
         crate::api::verification_rewards::get_public_user_stats,
+        // Wallets
+        crate::api::wallets::get_activity_calendar,
+        crate::api::wallets::get_largest_transfers,
     ),
     components(
         schemas(
@@ -182,6 +185,11 @@ use utoipa::OpenApi;
             crate::api::cost_calculator::RouteEstimate,
             crate::api::cost_calculator::CostCalculationResponse,
             crate::api::cost_calculator::ErrorResponse,
+            crate::api::wallets::ActivityDay,
+            crate::api::wallets::ActivityCalendarResponse,
+            crate::api::wallets::TransferDirection,
+            crate::api::wallets::LargestTransfer,
+            crate::api::wallets::LargestTransfersResponse,
         )
     ),
     tags(
@@ -214,6 +222,7 @@ use utoipa::OpenApi;
         (name = "SEP-10", description = "SEP-10 authentication endpoints"),
         (name = "SEP-24", description = "SEP-24 hosted deposit/withdrawal endpoints"),
         (name = "Verification Rewards", description = "Snapshot verification reward endpoints"),
+        (name = "Wallets", description = "Per-wallet dashboard endpoints (balance, activity, transfers)"),
     )
 )]
 pub struct ApiDoc;

@@ -16,19 +16,20 @@ pub mod types;
 
 pub use replay::{QueueProcessor, QueueReplayError};
 pub use types::{QueueMessage, QueueMessageStatus, QueueMessageType};
-//! Idempotent offline-action replay queue.
-//!
-//! Mobile and frontend clients persist mutations locally while offline (see
-//! `mobile/src/services/database.ts`'s `sync_queue` table and the replay
-//! logic in `mobile/src/hooks/useOfflineCaching.ts`) and resubmit them once
-//! connectivity returns. A replay can be interrupted and retried, so every
-//! action carries a client-generated `id` that this queue treats as an
-//! idempotency key: applying the same id twice runs the underlying mutation
-//! at most once, even under concurrent replay (e.g. two devices, or a retry
-//! racing the original request).
-//!
-//! See `docs/offline-sync.md` for the full client/server reconciliation
-//! contract this module implements one half of.
+
+// Idempotent offline-action replay queue.
+//
+// Mobile and frontend clients persist mutations locally while offline (see
+// `mobile/src/services/database.ts`'s `sync_queue` table and the replay
+// logic in `mobile/src/hooks/useOfflineCaching.ts`) and resubmit them once
+// connectivity returns. A replay can be interrupted and retried, so every
+// action carries a client-generated `id` that this queue treats as an
+// idempotency key: applying the same id twice runs the underlying mutation
+// at most once, even under concurrent replay (e.g. two devices, or a retry
+// racing the original request).
+//
+// See `docs/offline-sync.md` for the full client/server reconciliation
+// contract this module implements one half of.
 
 use chrono::{DateTime, Utc};
 use dashmap::mapref::entry::Entry;

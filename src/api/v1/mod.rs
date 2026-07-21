@@ -1,6 +1,6 @@
 use crate::api::{
     account_merges, anchors, cache_stats, corridors, cost_calculator, fee_bump, liquidity_pools,
-    metrics, oauth, price_feed as price_feed_api, rpc, webhooks,
+    metrics, oauth, price_feed as price_feed_api, rpc, wallets, webhooks,
 };
 use crate::auth_middleware::auth_middleware;
 use crate::cache::CacheManager;
@@ -92,6 +92,9 @@ pub fn routes(
         )
         .with_state(cached_state);
 
+    // Captured before `app_state` is moved into `protected_routes` below.
+    let wallets_db = app_state.db.clone();
+
     // 2. Public anchor routes
     let public_anchor_routes = Router::new()
         .route("/health", get(crate::handlers::health_check))
@@ -150,6 +153,7 @@ pub fn routes(
         )
         .nest("/liquidity-pools", liquidity_pools::routes(lp_analyzer))
         .nest("/prices", price_feed_api::routes(price_feed.clone()))
+        .nest("/wallets", wallets::routes(wallets_db, price_feed.clone()))
         .nest("/cost-calculator", cost_calculator::routes(price_feed))
         .nest("/cache/stats", cache_stats::routes(cache.clone()))
         .nest("/metrics", metrics::routes(cache.clone()))

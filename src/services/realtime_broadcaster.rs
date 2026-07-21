@@ -84,12 +84,12 @@ impl RealtimeBroadcaster {
     pub async fn start(&mut self) {
         info!("Starting RealtimeBroadcaster service");
 
+        // SAFETY: `start()` must only be called once per broadcaster instance.
+        // Taking twice is a programming error that should abort immediately.
+        #[allow(clippy::expect_used)]
         let shutdown_rx = self
             .shutdown_rx
             .take()
-            // SAFETY: `start()` must only be called once per broadcaster instance.
-            // Taking twice is a programming error that should abort immediately.
-            #[allow(clippy::expect_used)]
             .expect("Shutdown receiver already taken");
 
         let corridor_task = self.start_corridor_broadcast_task();

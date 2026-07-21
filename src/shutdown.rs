@@ -112,14 +112,13 @@ pub async fn wait_for_signal() {
     {
         use tokio::signal::unix::{signal, SignalKind};
 
+        // SAFETY: Failing to install a signal handler means the OS rejected
+        // the request — panicking at startup is the correct response.
+        #[allow(clippy::expect_used)]
         let mut sigterm =
-            // SAFETY: Failing to install a signal handler means the OS rejected
-            // the request — panicking at startup is the correct response.
-            #[allow(clippy::expect_used)]
             signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
-        let mut sigint =
-            #[allow(clippy::expect_used)]
-            signal(SignalKind::interrupt()).expect("Failed to install SIGINT handler");
+        #[allow(clippy::expect_used)]
+        let mut sigint = signal(SignalKind::interrupt()).expect("Failed to install SIGINT handler");
 
         tokio::select! {
             _ = sigterm.recv() => {
