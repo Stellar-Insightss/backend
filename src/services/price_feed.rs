@@ -209,6 +209,24 @@ impl PriceFeedClient {
         }
     }
 
+    /// Create a price feed client with an explicit provider, bypassing the
+    /// `CoinGecko`-only construction in [`Self::new`]. Used to inject a
+    /// deterministic provider in tests so handlers that depend on price
+    /// conversion don't make real network calls.
+    #[must_use]
+    pub fn with_provider(
+        provider: Arc<dyn PriceFeedProvider>,
+        config: PriceFeedConfig,
+        asset_mapping: HashMap<String, String>,
+    ) -> Self {
+        Self {
+            provider,
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            asset_mapping: Arc::new(asset_mapping),
+            config,
+        }
+    }
+
     /// Get price for a Stellar asset, returns USD value
     pub async fn get_price(&self, stellar_asset: &str) -> Result<f64> {
         // Check cache first

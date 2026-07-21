@@ -35,4 +35,5 @@ pub mod transactions;
 pub mod trustlines;
 pub mod v1;
 pub mod verification_rewards;
+pub mod wallets;
 pub mod webhooks;
