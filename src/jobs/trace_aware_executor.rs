@@ -38,9 +38,10 @@ where
 {
     type Output = F::Output;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let _guard = self.span.enter();
-        Pin::new(&mut self.future).poll(cx)
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let _guard = this.span.enter();
+        Pin::new(&mut this.future).poll(cx)
     }
 }
 

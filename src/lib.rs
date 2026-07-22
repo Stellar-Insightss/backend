@@ -6,7 +6,6 @@ pub mod admin_audit_log;
 pub mod alerts;
 pub mod analytics;
 pub mod api;
-pub mod debugging;
 pub mod api_analytics_middleware;
 pub mod api_contract;
 pub mod api_deprecation_middleware;
@@ -53,7 +52,6 @@ pub mod openapi;
 pub mod pagination;
 pub mod payload_limit;
 pub mod queue; // Idempotent offline-sync queue processor (issue #93)
-pub mod queue;
 pub mod rate_limit;
 pub mod replay;
 pub mod request_id;

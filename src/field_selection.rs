@@ -70,8 +70,8 @@ impl FieldSchema {
             if !invalid.is_empty() {
                 return Err(format!(
                     "Invalid fields: {}. Allowed: {}",
-                    invalid.join(", "),
-                    self.allowed_fields.iter().collect::<Vec<_>>().join(", ")
+                    invalid.iter().map(|f| f.as_str()).collect::<Vec<_>>().join(", "),
+                    self.allowed_fields.iter().map(String::as_str).collect::<Vec<_>>().join(", ")
                 ));
             }
         }

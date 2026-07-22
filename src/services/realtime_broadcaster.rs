@@ -381,7 +381,10 @@ impl WsMessage {
                 message,
                 timestamp,
             },
-            BroadcastMessage::ConnectionStatus { status } => Self::ConnectionStatus { status },
+            BroadcastMessage::ConnectionStatus { status } => Self::ConnectionStatus {
+                status,
+                previous_id: None,
+            },
         }
     }
 }

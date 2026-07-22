@@ -378,7 +378,7 @@ impl Sep10Service {
 
             // Clean up old entries
             let min_score = now - window;
-            conn.zremrangebyscore::<_, _, _, ()>(&key, "-inf", min_score)
+            conn.zrembyscore::<_, _, _, ()>(&key, "-inf", min_score)
                 .await
                 .map_err(|e| anyhow!("Rate limit cleanup failed: {e}"))?;
 
@@ -399,7 +399,7 @@ impl Sep10Service {
                 .map_err(|e| anyhow!("Rate limit update failed: {e}"))?;
 
             // Set expiry on the set itself
-            conn.expire::<_, ()>(&key, window as u64)
+            conn.expire::<_, ()>(&key, window)
                 .await
                 .map_err(|e| anyhow!("Rate limit expiry failed: {e}"))?;
         }
