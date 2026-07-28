@@ -9,11 +9,10 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
-use stellar_xdr::{
-    curr::{DecoratedSignature, Signature, TransactionEnvelope},
-    ReadXdr,
+use stellar_xdr::curr::{
+    DecoratedSignature, ReadXdr, Signature, SignatureHint, TransactionEnvelope, WriteXdr,
 };
 use std::convert::TryInto;
 
@@ -386,7 +385,7 @@ impl ContractService {
         debug!("XDR decoded to {} bytes", xdr_bytes.len());
 
         // Step 2: Parse the transaction envelope
-        let mut envelope = TransactionEnvelope::from_xdr(&xdr_bytes)
+        let mut envelope = TransactionEnvelope::from_xdr(&xdr_bytes, stellar_xdr::curr::Limits::none())
             .map_err(|e| anyhow::anyhow!("Failed to parse transaction XDR: {:?}", e))
             .context("Invalid transaction envelope XDR")?;
 
@@ -421,7 +420,7 @@ impl ContractService {
         tx_hasher.update(&[0, 0, 0, 2]); // ENVELOPE_TYPE_TX = 2
 
         // Hash the transaction envelope XDR
-        let envelope_xdr = envelope.to_xdr()
+        let envelope_xdr = envelope.to_xdr(stellar_xdr::curr::Limits::none())
             .map_err(|e| anyhow::anyhow!("Failed to re-encode transaction envelope: {:?}", e))?;
         tx_hasher.update(&envelope_xdr);
 
@@ -437,17 +436,21 @@ impl ContractService {
 
         // Step 6: Add signature to envelope
         match &mut envelope {
-            TransactionEnvelope::V1(e) => {
+            TransactionEnvelope::Tx(e) => {
                 // Compute signature hint from public key (last 4 bytes)
                 let public_bytes = verifying_key.to_bytes();
                 let hint_slice: [u8; 4] = public_bytes[28..32].try_into()?;
-                
+
                 let decorated_sig = DecoratedSignature {
-                    hint: hint_slice,
-                    signature: Signature(sig_bytes),
+                    hint: SignatureHint(hint_slice),
+                    signature: Signature(sig_bytes.try_into()?),
                 };
 
-                e.signatures.push(decorated_sig);
+                let mut signatures = e.signatures.to_vec();
+                signatures.push(decorated_sig);
+                e.signatures = signatures
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("Too many signatures for transaction envelope"))?;
                 debug!("Signature added to transaction envelope (total signatures: {})", e.signatures.len());
             }
             _ => {
@@ -456,7 +459,7 @@ impl ContractService {
         }
 
         // Step 7: Re-encode to base64
-        let final_xdr = envelope.to_xdr()
+        let final_xdr = envelope.to_xdr(stellar_xdr::curr::Limits::none())
             .map_err(|e| anyhow::anyhow!("Failed to encode signed transaction: {:?}", e))?;
         let signed_xdr = BASE64.encode(&final_xdr);
 

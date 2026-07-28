@@ -77,7 +77,7 @@ pub struct HealthComponents {
 }
 
 /// Check database connectivity and basic health.
-#[instrument(skip(db), fields(component = "database"), err)]
+#[instrument(skip(db), fields(component = "database"))]
 async fn check_database_health(db: &Database) -> ComponentHealth {
     let start = Instant::now();
 
@@ -97,7 +97,7 @@ async fn check_database_health(db: &Database) -> ComponentHealth {
 }
 
 /// Check cache connectivity and basic health.
-#[instrument(skip(cache), fields(component = "cache"), err)]
+#[instrument(skip(cache), fields(component = "cache"))]
 async fn check_cache_health(cache: &CacheManager) -> ComponentHealth {
     let start = Instant::now();
 
@@ -117,11 +117,11 @@ async fn check_cache_health(cache: &CacheManager) -> ComponentHealth {
 }
 
 /// Check Stellar RPC connectivity and basic health.
-#[instrument(skip(rpc), fields(component = "rpc"), err)]
+#[instrument(skip(rpc), fields(component = "rpc"))]
 async fn check_rpc_health(rpc: &StellarRpcClient) -> ComponentHealth {
     let start = Instant::now();
 
-    match rpc.health_check().await {
+    match rpc.check_health().await {
         Ok(_) => {
             let elapsed = start.elapsed().as_millis() as u64;
             tracing::info!(response_time_ms = elapsed, "RPC health check passed");
@@ -166,7 +166,7 @@ fn total_response_time(components: &HealthComponents) -> u64 {
 ///
 /// This handler runs all component health checks in parallel and returns
 /// a comprehensive status. It is instrumented with OpenTelemetry tracing.
-#[instrument(skip(db, cache, rpc), fields(endpoint = "/health"), err)]
+#[instrument(skip(db, cache, rpc), fields(endpoint = "/health"))]
 pub async fn health_check_handler(
     State(db): State<Database>,
     State(cache): State<CacheManager>,
