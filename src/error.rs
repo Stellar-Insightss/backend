@@ -276,6 +276,20 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
+impl From<crate::pagination_queries::PaginationError> for ApiError {
+    fn from(error: crate::pagination_queries::PaginationError) -> Self {
+        use crate::pagination_queries::PaginationError;
+        match error {
+            PaginationError::InvalidCursor(message) => Self::bad_request("INVALID_CURSOR", message),
+            PaginationError::ExpiredSnapshot => Self::bad_request(
+                "CURSOR_EXPIRED",
+                "This result snapshot has expired; restart from the first page",
+            ),
+            other => Self::internal("PAGINATION_ERROR", other.to_string()),
+        }
+    }
+}
+
 /// Convert from `sqlx::Error`
 impl From<sqlx::Error> for ApiError {
     fn from(err: sqlx::Error) -> Self {

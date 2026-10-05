@@ -98,6 +98,12 @@ pub fn routes(
 
     // Captured before `app_state` is moved into `protected_routes` below.
     let wallets_db = app_state.db.clone();
+    let ledger_routes = Router::new()
+        .route(
+            "/ledger/transactions",
+            get(crate::api::transactions::list_ledger_transactions),
+        )
+        .with_state(app_state.db.clone());
 
     // 2. Public anchor routes
     let public_anchor_routes = Router::new()
@@ -174,6 +180,7 @@ pub fn routes(
     // V1 router (mounted at /api/v1 and also preserved at root for compatibility)
     let v1_router = Router::new()
         .merge(cached_routes)
+        .merge(ledger_routes)
         .merge(public_anchor_routes)
         .merge(protected_routes)
         .merge(protected_webhook_routes)

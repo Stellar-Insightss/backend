@@ -18,6 +18,62 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+/// A versioned seek boundary over an immutable timestamp and monotonic sequence.
+/// `ceiling` excludes rows inserted after the first page, including backdated rows.
+/// RPC collections also bind the boundary to a retained result snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompoundCursor {
+    pub v: u8,
+    pub scope: String,
+    pub ts: i64,
+    pub id: i64,
+    pub ceiling: i64,
+    pub total: i64,
+    pub snapshot: Option<String>,
+}
+
+impl CompoundCursor {
+    pub fn encode(&self) -> Result<String, serde_json::Error> {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(self)?))
+    }
+
+    pub fn decode(encoded: &str, scope: &str) -> Result<Self, String> {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        if encoded.len() > 2048 {
+            return Err("Cursor exceeds the maximum encoded length".to_string());
+        }
+        let bytes = URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(|_| "Invalid cursor encoding".to_string())?;
+        let cursor: Self =
+            serde_json::from_slice(&bytes).map_err(|_| "Invalid cursor payload".to_string())?;
+        if cursor.v != 1
+            || cursor.scope != scope
+            || cursor.id <= 0
+            || cursor.id > cursor.ceiling
+            || cursor.total < 0
+            || cursor.snapshot.as_ref().is_some_and(|id| id.len() > 64)
+        {
+            return Err("Cursor does not match this collection or traversal".to_string());
+        }
+        Ok(cursor)
+    }
+}
+
+/// Cursor pages use a bounded positive limit. Offset traversal has been replaced
+/// by the returned opaque cursor; mixing the two would reintroduce unstable seeks.
+pub fn validate_page_request(limit: i64, offset: i64) -> Result<(), String> {
+    if !(1..=100).contains(&limit) {
+        return Err("limit must be between 1 and 100".to_string());
+    }
+    if offset != 0 {
+        return Err("Use pagination.next_cursor instead of a nonzero offset".to_string());
+    }
+    Ok(())
+}
+
 /// Cursor-based pagination metadata for efficient traversal.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CursorPageMeta {
@@ -41,7 +97,13 @@ pub struct CursorPageMeta {
 impl CursorPageMeta {
     /// Create pagination metadata for a cursor-based response.
     #[must_use]
-    pub fn new(total: i64, limit: i64, cursor: Option<String>, has_next: bool, next_cursor: Option<String>) -> Self {
+    pub fn new(
+        total: i64,
+        limit: i64,
+        cursor: Option<String>,
+        has_next: bool,
+        next_cursor: Option<String>,
+    ) -> Self {
         Self {
             limit,
             total,
@@ -115,7 +177,13 @@ mod tests {
 
     #[test]
     fn cursor_page_meta_has_next() {
-        let meta = CursorPageMeta::new(100, 50, Some("cursor1".to_string()), true, Some("cursor2".to_string()));
+        let meta = CursorPageMeta::new(
+            100,
+            50,
+            Some("cursor1".to_string()),
+            true,
+            Some("cursor2".to_string()),
+        );
         assert!(meta.has_next);
         assert_eq!(meta.limit, 50);
         assert_eq!(meta.total, 100);

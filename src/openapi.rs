@@ -28,6 +28,7 @@ use utoipa::OpenApi;
         // Corridors
         crate::api::corridors::list_corridors,
         crate::api::corridors::get_corridor_detail,
+        crate::api::transactions::list_ledger_transactions,
         // Price Feed
         crate::api::price_feed::get_price,
         crate::api::price_feed::get_prices,

@@ -14,12 +14,12 @@ use uuid::Uuid;
 
 use crate::broadcast::broadcast_anchor_update;
 use crate::cache::helpers::cached_query;
-use crate::cache::keys;
 use crate::cache::CacheManager;
+use crate::cursor_pagination::{validate_page_request, CompoundCursor, CursorPaginatedResponse};
 use crate::database::Database;
 use crate::error::{ApiError, ApiResult};
 use crate::models::{AnchorDetailResponse, CreateAnchorRequest};
-use crate::pagination::PaginatedResponse;
+use crate::pagination_queries;
 use crate::rpc::circuit_breaker::rpc_circuit_breaker;
 use crate::rpc::error::{with_retry, RetryConfig, RpcError};
 use crate::rpc::StellarRpcClient;
@@ -305,6 +305,8 @@ pub struct ListAnchorsQuery {
     #[serde(default)]
     #[param(example = 0)]
     pub offset: i64,
+    /// Opaque continuation from pagination.next_cursor. Omit for a new traversal.
+    pub cursor: Option<String>,
 }
 
 const fn default_limit() -> i64 {
@@ -411,7 +413,8 @@ pub struct AnchorsResponse {
     path = "/api/anchors",
     params(ListAnchorsQuery),
     responses(
-        (status = 200, description = "List of anchors retrieved successfully", body = AnchorsResponse),
+        (status = 200, description = "List of anchors retrieved successfully", body = CursorPaginatedResponse<AnchorMetricsResponse>),
+        (status = 400, description = "Invalid cursor, limit, or offset"),
         (status = 500, description = "Internal server error")
     ),
     tag = "Anchors"
@@ -427,27 +430,44 @@ pub async fn get_anchors(
     Query(params): Query<ListAnchorsQuery>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let cache_key = keys::anchor_list(params.limit, params.offset);
+    validate_page_request(params.limit, params.offset)
+        .map_err(|message| ApiError::bad_request("INVALID_PAGINATION", message))?;
+    if let Some(cursor) = params.cursor.as_deref() {
+        let decoded = CompoundCursor::decode(cursor, "anchors")
+            .map_err(|message| ApiError::bad_request("INVALID_CURSOR", message))?;
+        if decoded.snapshot.is_some() {
+            return Err(ApiError::bad_request(
+                "INVALID_CURSOR",
+                "Unexpected RPC snapshot",
+            ));
+        }
+    }
+    let cache_key = format!(
+        "anchor:list:cursor:v1:{}:{}",
+        params.limit,
+        params.cursor.as_deref().unwrap_or("first")
+    );
 
     let response = cached_query(
         &cache,
         &cache_key,
         cache.config.get_ttl("anchor"),
         || async {
-            // Get anchor metadata from database (names, accounts, etc.)
-            let anchors: Vec<crate::models::Anchor> =
-                db.list_anchors(params.limit, params.offset).await?;
-
-            // Total count for pagination metadata (runs in parallel with list query)
-            let total = db.count_anchors().await.unwrap_or(0);
+            let CursorPaginatedResponse {
+                data: anchors,
+                pagination,
+            } = pagination_queries::list_anchors::<crate::models::Anchor>(
+                db.pool(),
+                params.limit,
+                params.cursor.as_deref(),
+            )
+            .await?;
 
             if anchors.is_empty() {
-                return Ok(PaginatedResponse::new(
-                    Vec::<AnchorMetricsResponse>::new(),
-                    total,
-                    params.limit,
-                    params.offset,
-                ));
+                return Ok(CursorPaginatedResponse {
+                    data: Vec::<AnchorMetricsResponse>::new(),
+                    pagination,
+                });
             }
 
             // OPTIMIZATION: Batch fetch all assets for these anchors (1 query instead of N)
@@ -545,12 +565,10 @@ pub async fn get_anchors(
                 anchor_responses.push(anchor_response);
             }
 
-            Ok(PaginatedResponse::new(
-                anchor_responses,
-                total,
-                params.limit,
-                params.offset,
-            ))
+            Ok(CursorPaginatedResponse {
+                data: anchor_responses,
+                pagination,
+            })
         },
     )
     .await?;
@@ -563,6 +581,7 @@ pub async fn get_anchors(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::keys;
     use crate::cache::{CacheConfig, CacheManager};
     use crate::rpc::circuit_breaker::rpc_circuit_breaker;
     use crate::rpc::StellarRpcClient;
