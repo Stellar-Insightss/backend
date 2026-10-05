@@ -50,6 +50,7 @@ pub mod network;
 pub mod observability;
 pub mod openapi;
 pub mod pagination;
+pub mod pagination_queries;
 pub mod payload_limit;
 pub mod queue; // Idempotent offline-sync queue processor (issue #93)
 pub mod rate_limit;

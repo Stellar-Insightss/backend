@@ -1,16 +1,66 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
     Json, Router,
 };
 use serde::Deserialize;
+use std::sync::Arc;
+use utoipa::IntoParams;
 use uuid::Uuid;
 
 use crate::{
     models::{PendingTransaction, PendingTransactionWithSignatures, TransactionResult},
     state::AppState,
 };
+
+use crate::cursor_pagination::{validate_page_request, CursorPaginatedResponse};
+use crate::database::Database;
+use crate::error::{ApiError, ApiResult};
+use crate::pagination_queries::{self, LedgerTransaction};
+
+/// Query parameters for the ingested ledger transaction collection.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ListLedgerTransactionsQuery {
+    #[serde(default = "default_list_limit")]
+    pub limit: i64,
+    #[serde(default)]
+    pub offset: i64,
+    pub cursor: Option<String>,
+}
+
+const fn default_list_limit() -> i64 {
+    50
+}
+
+/// List stored ledger-ingestion records; pending signing requests are separate.
+#[utoipa::path(
+    get,
+    path = "/api/v1/ledger/transactions",
+    params(ListLedgerTransactionsQuery),
+    responses(
+        (status = 200, description = "Stored ledger transaction page", body = CursorPaginatedResponse<LedgerTransaction>),
+        (status = 400, description = "Invalid cursor, limit, or offset"),
+        (status = 500, description = "Database error")
+    ),
+    tag = "Transactions"
+)]
+pub async fn list_ledger_transactions(
+    State(db): State<Arc<Database>>,
+    Query(params): Query<ListLedgerTransactionsQuery>,
+) -> ApiResult<Json<CursorPaginatedResponse<LedgerTransaction>>> {
+    validate_page_request(params.limit, params.offset)
+        .map_err(|message| ApiError::bad_request("INVALID_PAGINATION", message))?;
+    Ok(Json(
+        pagination_queries::list_ledger_transactions(
+            db.pool(),
+            params.limit,
+            params.cursor.as_deref(),
+        )
+        .await?,
+    ))
+}
 
 // Request/Response DTOs
 #[derive(Debug, Deserialize)]

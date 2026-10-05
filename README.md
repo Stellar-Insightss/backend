@@ -10,6 +10,9 @@
 
 </div>
 
+Live collection pagination is documented in [Cursor pagination](docs/CURSOR_PAGINATION.md),
+including continuation requests, immutable ordering and RPC snapshot expiry.
+
 ---
 
 ## What it does
