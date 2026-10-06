@@ -269,7 +269,7 @@ impl JobMetricsCollector {
 
         // Record metrics
         JOB_EXECUTIONS_TOTAL
-            .with_label_values(&[job_name, "success"])
+            .with_label_values::<&str>(&[job_name, "success"])
             .inc();
         JOB_DURATION_SECONDS
             .with_label_values(&[job_name])
@@ -296,7 +296,7 @@ impl JobMetricsCollector {
 
         // Record metrics
         JOB_EXECUTIONS_TOTAL
-            .with_label_values(&[job_name, "failure"])
+            .with_label_values::<&str>(&[job_name, "failure"])
             .inc();
         JOB_FAILURES_TOTAL
             .with_label_values(&[job_name, &error_type])
@@ -327,10 +327,10 @@ impl JobMetricsCollector {
 
         // Record metrics
         JOB_EXECUTIONS_TOTAL
-            .with_label_values(&[job_name, "timeout"])
+            .with_label_values::<&str>(&[job_name, "timeout"])
             .inc();
         JOB_FAILURES_TOTAL
-            .with_label_values(&[job_name, "timeout"])
+            .with_label_values::<&str>(&[job_name, "timeout"])
             .inc();
         JOB_DURATION_SECONDS
             .with_label_values(&[job_name])

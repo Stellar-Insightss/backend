@@ -47,6 +47,13 @@ mod webhook_integration_tests {
         .await
         .unwrap();
 
+        sqlx::raw_sql(include_str!(
+            "../migrations/035_webhook_delivery_retries.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
         pool
     }
 
@@ -99,6 +106,40 @@ mod webhook_integration_tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].1, webhook_id);
         assert_eq!(events[0].2, "anchor.status_changed");
+    }
+
+    #[tokio::test]
+    async fn test_event_enqueue_failure_is_not_reported_as_success() {
+        let pool = setup_test_db().await;
+        sqlx::raw_sql(
+            "INSERT INTO webhooks (id, user_id, url, event_types, secret)
+             VALUES ('webhook', 'owner', 'https://example.com/webhook', 'payment.created', 'secret');
+             CREATE TRIGGER reject_event BEFORE INSERT ON webhook_events
+             BEGIN SELECT RAISE(ABORT, 'event enqueue rejected'); END;",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let result = WebhookEventService::new(pool.clone())
+            .trigger_payment_created(
+                "payment",
+                "source",
+                "destination",
+                "XLM",
+                "native",
+                42.0,
+                "2026-01-01T00:00:00Z",
+            )
+            .await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("event enqueue rejected"));
+        let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM webhook_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(events, 0);
     }
 
     #[tokio::test]
