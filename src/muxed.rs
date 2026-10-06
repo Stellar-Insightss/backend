@@ -8,8 +8,8 @@ use data_encoding::BASE32;
 use serde::{Deserialize, Serialize};
 
 /// Stellar strkey version bytes
-const VERSION_ACCOUNT_ID: u8 = 6; // G-address
-const VERSION_MUXED_ACCOUNT: u8 = 12; // M-address
+const VERSION_ACCOUNT_ID: u8 = 6 << 3; // G-address
+const VERSION_MUXED_ACCOUNT: u8 = 12 << 3; // M-address
 
 /// Length of a Stellar M-address (`MUXED_ACCOUNT` strkey)
 pub const MUXED_ADDRESS_LEN: usize = 69;
@@ -84,7 +84,7 @@ pub fn parse_muxed_address(addr: &str) -> Option<MuxedAccountInfo> {
     if decoded[0] != VERSION_MUXED_ACCOUNT {
         return None;
     }
-    let checksum = u16::from_be_bytes([decoded[41], decoded[42]]);
+    let checksum = u16::from_le_bytes([decoded[41], decoded[42]]);
     let payload = &decoded[0..41];
     if crc16(payload) != checksum {
         return None;
@@ -97,9 +97,8 @@ pub fn parse_muxed_address(addr: &str) -> Option<MuxedAccountInfo> {
     let mut g_payload = [0u8; 35];
     g_payload[0] = VERSION_ACCOUNT_ID;
     g_payload[1..33].copy_from_slice(account_id);
-    let c = crc16(&g_payload);
-    g_payload[33] = (c >> 8) as u8;
-    g_payload[34] = (c & 0xff) as u8;
+    let checksum = crc16(&g_payload[..33]).to_le_bytes();
+    g_payload[33..35].copy_from_slice(&checksum);
     let base_account = BASE32.encode(&g_payload);
 
     Some(MuxedAccountInfo {
@@ -160,13 +159,15 @@ mod tests {
             parse_muxed_address("GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ")
                 .is_none()
         );
-        // Valid M-address format: parse may succeed (if checksum/version match) or None
+        // SEP-0023 regression: decode a real Stellar M-address exactly.
         let m = "MAAAAAAAAAAAAAB7BQ2L7E5NBWMXDUCMZSIPOBKRDSBYVLMXGSSKF6YNPIB7Y77ITLVL6";
-        let info = parse_muxed_address(m);
-        if let Some(ref i) = info {
-            assert!(i.muxed_address == m);
-            assert!(i.base_account.as_ref().is_none_or(|g| g.starts_with('G')));
-        }
+        let info = parse_muxed_address(m).expect("valid Stellar muxed account");
+        assert_eq!(info.muxed_address, m);
+        assert_eq!(
+            info.base_account.as_deref(),
+            Some("GAAAAAAAAAAAAAB7BQ2L7E5NBWMXDUCMZSIPOBKRDSBYVLMXGSSKFK3W")
+        );
+        assert_eq!(info.muxed_id, Some(18_090_249_435_756_882_074));
         // Too short M string
         assert!(parse_muxed_address("M").is_none());
     }
