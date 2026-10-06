@@ -5,7 +5,7 @@ use stellar_analysis_backend::rate_limit::policy::{
     MuxedAccountRateLimiter, MuxedRateLimitConfig, MuxedRateLimitTier,
 };
 
-const VERSION_MUXED_ACCOUNT: u8 = 12;
+const VERSION_MUXED_ACCOUNT: u8 = 12 << 3;
 const CRC16_POLY: u16 = 0x1021;
 
 fn crc16(data: &[u8]) -> u16 {
@@ -28,7 +28,7 @@ fn muxed_address(account_id: [u8; 32], muxed_id: u64) -> String {
     raw[0] = VERSION_MUXED_ACCOUNT;
     raw[1..33].copy_from_slice(&account_id);
     raw[33..41].copy_from_slice(&muxed_id.to_be_bytes());
-    let checksum = crc16(&raw[..41]).to_be_bytes();
+    let checksum = crc16(&raw[..41]).to_le_bytes();
     raw[41..43].copy_from_slice(&checksum);
     BASE32.encode(&raw)
 }
