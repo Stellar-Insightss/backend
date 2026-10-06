@@ -37,16 +37,7 @@ pub struct MuxedRateLimitConfig {
     pub per_base_refill_per_second: f64,
 }
 
-impl Default for MuxedRateLimitConfig {
-    fn default() -> Self {
-        Self {
-            per_muxed_capacity: 30,
-            per_muxed_refill_per_second: 0.5,
-            per_base_capacity: 300,
-            per_base_refill_per_second: 5.0,
-        }
-    }
-}
+// Deliberately no Default: base-account fan-out is a product decision, not an engineering guess.
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MuxedRateLimitError {
