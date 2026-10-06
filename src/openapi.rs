@@ -110,6 +110,7 @@ use utoipa::OpenApi;
         crate::api::webhooks::get_webhook,
         crate::api::webhooks::delete_webhook,
         crate::api::webhooks::test_webhook,
+        crate::api::webhooks::get_webhook_event_status,
         // Account Merges
         crate::api::account_merges::get_account_merge_stats,
         crate::api::account_merges::get_recent_account_merges,

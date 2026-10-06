@@ -40,9 +40,8 @@ use stellar_analysis_backend::{
         concurrency_limit_middleware, panic_recovery_middleware, ApiVersioning, BatchEndpoints,
         ConcurrencyLimitState, DatabaseSchemaSeparation, DeprecationWarnings, ETagCachingSupport,
         FieldSelectionParameter, MobilePaginationEndpoints, MobileRequestLogging,
-        NetworkAwareRpcClient, NetworkContextMiddleware, PushNotificationService,
-        ResponseCompression, WebSocketRealTimeUpdates, PushNotificationRegistration,
-        Sep10ForMobile,
+        NetworkAwareRpcClient, NetworkContextMiddleware, PushNotificationRegistration,
+        PushNotificationService, ResponseCompression, Sep10ForMobile, WebSocketRealTimeUpdates,
     },
     observability::logging::request_response_logging_middleware,
     observability::metrics as obs_metrics,
@@ -223,9 +222,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Push notification service initialized");
 
     // Initialize SEP-10 for mobile (issue #1376)
-    let _sep10_for_mobile = Sep10ForMobile::new(
-        stellar_analysis_backend::models::sep10_for_mobile::Config::default(),
-    );
+    let _sep10_for_mobile =
+        Sep10ForMobile::new(stellar_analysis_backend::models::sep10_for_mobile::Config::default());
     tracing::info!("SEP-10 for mobile initialized");
 
     // Initialize push notification registration (issue #1377)
@@ -506,11 +504,21 @@ async fn main() -> anyhow::Result<()> {
         .route("/graphql/health", get(graphql_health_handler))
         .layer(axum::Extension(Arc::clone(&graphql_api)));
 
+    // Protected routes consume the configured secret through this extension.
+    let jwt_secret = std::env::var("JWT_SECRET")
+        .context("JWT_SECRET is required for authenticated API routes")?;
+
     let app = base_routes
         .nest("/admin", admin_routes)
         .merge(graphql_routes)
         .merge(ws_routes)
-        .route("/swagger-ui/*path", get(|| async { "Swagger UI documentation" }))
+        .route(
+            "/swagger-ui/*path",
+            get(|| async { "Swagger UI documentation" }),
+        )
+        .layer(axum::Extension(
+            stellar_analysis_backend::auth_middleware::JwtSecret(Arc::from(jwt_secret)),
+        ))
         .layer(middleware::from_fn(
             stellar_analysis_backend::payload_limit::payload_limit_middleware,
         ))
@@ -544,7 +552,7 @@ async fn main() -> anyhow::Result<()> {
                 .br(true)
                 .quality(compression_level)
                 .compress_when(
-                    SizeAbove::new(compression_min_size)
+                    SizeAbove::new(u64::from(compression_min_size))
                         .and(NotForContentType::IMAGES)
                         .and(NotForContentType::SSE),
                 ),

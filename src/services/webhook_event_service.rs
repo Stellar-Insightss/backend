@@ -140,10 +140,9 @@ impl WebhookEventService {
             }
 
             // Create webhook event for delivery
-            let _ = self
-                .webhook_service
+            self.webhook_service
                 .create_webhook_event(&webhook.id, event_type_str, payload.clone())
-                .await;
+                .await?;
 
             tracing::info!(
                 "Webhook event triggered: webhook_id={}, event_type={}",

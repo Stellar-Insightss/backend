@@ -131,9 +131,10 @@ pub fn routes(
         .with_state(app_state)
         .layer(middleware::from_fn(auth_middleware));
 
-    let protected_webhook_routes = Router::new()
-        .nest("/webhooks", webhooks::routes(pool.clone()))
-        .layer(middleware::from_fn(auth_middleware));
+    let protected_webhook_routes = webhooks::versioned_routes(pool.clone());
+
+    let unversioned_webhook_routes =
+        webhooks::routes(pool.clone()).layer(middleware::from_fn(auth_middleware));
 
     // 4. RPC routes
     let rpc_routes = Router::new()
@@ -189,6 +190,7 @@ pub fn routes(
         .route("/api/version", get(get_api_version))
         // Preserve existing unversioned endpoints for backward compatibility.
         .merge(v1_router)
+        .merge(unversioned_webhook_routes)
         .layer(cors)
         .layer(middleware::from_fn(
             crate::request_id::request_id_middleware,
