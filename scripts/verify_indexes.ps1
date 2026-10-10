@@ -88,6 +88,28 @@ Check-Index "idx_anchor_metrics_anchor_time" "anchor_metrics_history"
 Check-Index "idx_anchor_metrics_timestamp" "anchor_metrics_history"
 Write-Host ""
 
+Write-Host "Checking Network Daily Metrics Indexes:" -ForegroundColor Yellow
+Write-Host "-----------------------------------"
+Check-Index "idx_network_daily_metrics_date" "network_daily_metrics"
+Write-Host ""
+
+Write-Host "Checking Soroban Daily Metrics Indexes:" -ForegroundColor Yellow
+Write-Host "-----------------------------------"
+Check-Index "idx_soroban_daily_metrics_date" "soroban_daily_metrics"
+Check-Index "idx_soroban_daily_metrics_contract" "soroban_daily_metrics"
+Write-Host ""
+
+Write-Host "Checking Wallet Balance Snapshots Indexes:" -ForegroundColor Yellow
+Write-Host "-----------------------------------"
+Check-Index "idx_wallet_balance_snapshots_unique" "wallet_balance_snapshots"
+Check-Index "idx_wallet_balance_snapshots_address_time" "wallet_balance_snapshots"
+Write-Host ""
+
+Write-Host "Checking Daily Stat Snapshots Indexes:" -ForegroundColor Yellow
+Write-Host "-----------------------------------"
+Check-Index "idx_daily_stat_snapshots_date" "daily_stat_snapshots"
+Write-Host ""
+
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "Query Plan Verification" -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
@@ -113,6 +135,26 @@ Write-Host "-----------------------------------"
 sqlite3 $DB_PATH "EXPLAIN QUERY PLAN SELECT * FROM assets WHERE asset_code = 'USDC';"
 Write-Host ""
 
+Write-Host "Testing: Network daily metrics time-range query (#15-#19)" -ForegroundColor Yellow
+Write-Host "-----------------------------------"
+sqlite3 $DB_PATH "EXPLAIN QUERY PLAN SELECT * FROM network_daily_metrics WHERE date >= date('now', '-30 days') ORDER BY date DESC;"
+Write-Host ""
+
+Write-Host "Testing: Soroban daily metrics by contract (#21-#24)" -ForegroundColor Yellow
+Write-Host "-----------------------------------"
+sqlite3 $DB_PATH "EXPLAIN QUERY PLAN SELECT * FROM soroban_daily_metrics WHERE contract_id = 'CXXXXXX' AND date >= date('now', '-30 days') ORDER BY date DESC;"
+Write-Host ""
+
+Write-Host "Testing: Wallet balance history time-series query (#26)" -ForegroundColor Yellow
+Write-Host "-----------------------------------"
+sqlite3 $DB_PATH "EXPLAIN QUERY PLAN SELECT * FROM wallet_balance_snapshots WHERE address = 'GXXXXXX' ORDER BY snapshot_at DESC;"
+Write-Host ""
+
+Write-Host "Testing: Daily stat snapshot vs-yesterday delta (#3)" -ForegroundColor Yellow
+Write-Host "-----------------------------------"
+sqlite3 $DB_PATH "EXPLAIN QUERY PLAN SELECT * FROM daily_stat_snapshots WHERE date >= date('now', '-7 days') ORDER BY date DESC;"
+Write-Host ""
+
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "Index Statistics" -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
@@ -124,7 +166,7 @@ SELECT
     tbl_name as table_name,
     COUNT(*) as index_count
 FROM sqlite_master 
-WHERE type='index' AND tbl_name IN ('payments', 'assets', 'corridors', 'corridor_metrics', 'anchors', 'anchor_metrics_history')
+WHERE type='index' AND tbl_name IN ('payments', 'assets', 'corridors', 'corridor_metrics', 'anchors', 'anchor_metrics_history', 'network_daily_metrics', 'soroban_daily_metrics', 'wallet_balance_snapshots', 'daily_stat_snapshots')
 GROUP BY tbl_name
 ORDER BY tbl_name;
 "@
@@ -139,11 +181,19 @@ $paymentsCount = sqlite3 $DB_PATH "SELECT COUNT(*) FROM payments;"
 $assetsCount = sqlite3 $DB_PATH "SELECT COUNT(*) FROM assets;"
 $corridorsCount = sqlite3 $DB_PATH "SELECT COUNT(*) FROM corridors;"
 $anchorsCount = sqlite3 $DB_PATH "SELECT COUNT(*) FROM anchors;"
+$networkMetricsCount = sqlite3 $DB_PATH "SELECT COUNT(*) FROM network_daily_metrics;"
+$sorobanMetricsCount = sqlite3 $DB_PATH "SELECT COUNT(*) FROM soroban_daily_metrics;"
+$walletSnapshotsCount = sqlite3 $DB_PATH "SELECT COUNT(*) FROM wallet_balance_snapshots;"
+$dailyStatSnapshotsCount = sqlite3 $DB_PATH "SELECT COUNT(*) FROM daily_stat_snapshots;"
 
 Write-Host "Payments: $paymentsCount"
 Write-Host "Assets: $assetsCount"
 Write-Host "Corridors: $corridorsCount"
 Write-Host "Anchors: $anchorsCount"
+Write-Host "Network Daily Metrics: $networkMetricsCount"
+Write-Host "Soroban Daily Metrics: $sorobanMetricsCount"
+Write-Host "Wallet Balance Snapshots: $walletSnapshotsCount"
+Write-Host "Daily Stat Snapshots: $dailyStatSnapshotsCount"
 Write-Host ""
 
 Write-Host "==========================================" -ForegroundColor Cyan
